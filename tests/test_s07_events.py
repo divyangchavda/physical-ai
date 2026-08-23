@@ -3,12 +3,40 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from src.schema.detection import BoundingBox
 from src.schema.event import PhysicalEvent, ActionType
 from src.schema.segment import CandidateSegment
+from src.schema.track import Track, TrackPoint
 from src.schema.vlm import RawVLMObservation, VLMSegmentStatus
 from src.stages.s07_events import _map_raw_action_to_type, _extract_events_from_vlm_observations
 from src.context import PipelineContext
 from src.config import PipelineConfig
+
+
+def _make_track(track_id: int, class_name: str, n_points: int = 3) -> Track:
+    """Minimal Track with *n_points* points — point count breaks resolver ties."""
+    points = [
+        TrackPoint(
+            frame_index=i,
+            timestamp_sec=i * 0.1,
+            bbox=BoundingBox(x1=0, y1=0, x2=10, y2=10),
+            detection_confidence=0.9,
+            tracking_confidence=0.9,
+        )
+        for i in range(n_points)
+    ]
+    return Track(
+        track_id=track_id,
+        class_name=class_name,
+        class_id=0,
+        points=points,
+        start_frame=0,
+        end_frame=n_points - 1,
+        start_sec=0.0,
+        end_sec=(n_points - 1) * 0.1,
+        source="test",
+        is_estimated=True,
+    )
 
 
 def test_map_raw_action_to_type():
@@ -58,6 +86,14 @@ def test_extract_events_from_vlm_observations():
         )
     ]
     
+    # Identities are resolved by class against ctx.tracks, so the tracks must
+    # exist. Track 2 is the person and track 1 the object on purpose: a
+    # position-based resolver would pick track 1 as the actor and get it wrong.
+    ctx.tracks = [
+        _make_track(1, "box", n_points=3),
+        _make_track(2, "person", n_points=5),
+    ]
+
     # Create VLM observation with SUCCESS status
     ctx.vlm_observations = [
         RawVLMObservation(
@@ -95,18 +131,130 @@ def test_extract_events_from_vlm_observations():
     assert event.confidence == 0.9
     assert event.source == "vlm:gemini"
     assert event.is_estimated is True
-    assert event.actor_track_id == 1  # First track from segment
-    assert event.object_track_id is None
+    assert event.actor_track_id == 2   # the "person" track, not track_ids[0]
+    assert event.object_track_id == 1  # "box" matched to the box track
     assert event.start_sec == 11.0
     assert event.end_sec == 15.0
     assert event.review_status == "PENDING"
-    
+
     # Check attributes
     assert event.attributes["raw_action"] == "picking up the box"
     assert event.attributes["actor"] == "person"
     assert event.attributes["active_hand"] == "BOTH"
     assert event.attributes["objects"] == ["box"]
+    assert event.attributes["object_label"] == "box"
     assert event.attributes["state_change"] == "box moved"
+    # 11.0-15.0 sits strictly inside the 10.0-20.0 segment: real localisation.
+    assert event.attributes["timing_precision"] == "EXACT"
+
+
+def test_timing_precision_segment_when_vlm_echoes_clip_bounds():
+    """VLM returning the clip bounds is describing the clip, not timing it."""
+    config = PipelineConfig(stub_mode=False)
+    ctx = PipelineContext(
+        config=config,
+        video_path=Path("test.mp4"),
+        output_dir=Path("output"),
+    )
+    ctx.candidate_segments = [
+        CandidateSegment(
+            segment_id="seg_001",
+            track_ids=[1],
+            start_frame=0,
+            end_frame=100,
+            start_sec=0.0,
+            end_sec=7.0,
+            trigger_reason="test",
+            confidence=0.8,
+            source="test",
+            status="PENDING",
+        )
+    ]
+    ctx.tracks = [_make_track(1, "person")]
+    ctx.vlm_observations = [
+        RawVLMObservation(
+            observation_id="obs_001",
+            segment_id="seg_001",
+            status=VLMSegmentStatus.SUCCESS,
+            backend="GEMINI",
+            model_name="gemini-test",
+            segment_start_sec=0.0,
+            segment_end_sec=7.0,
+            actor="person",
+            active_hand="RIGHT",
+            objects=["cardboard box"],
+            raw_action="placing the box",
+            start_time_sec=0.0,   # == segment bounds
+            end_time_sec=7.0,
+            state_change="box on table",
+            visible_facts="hand on box",
+            inference="placement",
+            uncertainty="none",
+            confidence=0.9,
+        )
+    ]
+
+    events = _extract_events_from_vlm_observations(ctx)
+    assert len(events) == 1
+    assert events[0].attributes["timing_precision"] == "SEGMENT"
+
+
+def test_actor_unresolved_when_segment_has_no_person():
+    """No person track in the segment -> None, not a guess at another class."""
+    config = PipelineConfig(stub_mode=False)
+    ctx = PipelineContext(
+        config=config,
+        video_path=Path("test.mp4"),
+        output_dir=Path("output"),
+    )
+    ctx.candidate_segments = [
+        CandidateSegment(
+            segment_id="seg_001",
+            track_ids=[7, 8],
+            start_frame=0,
+            end_frame=100,
+            start_sec=0.0,
+            end_sec=5.0,
+            trigger_reason="test",
+            confidence=0.8,
+            source="test",
+            status="PENDING",
+        )
+    ]
+    # A background class and an object — neither may stand in for the actor.
+    ctx.tracks = [
+        _make_track(7, "dining table"),
+        _make_track(8, "cardboard box"),
+    ]
+    ctx.vlm_observations = [
+        RawVLMObservation(
+            observation_id="obs_001",
+            segment_id="seg_001",
+            status=VLMSegmentStatus.SUCCESS,
+            backend="GEMINI",
+            model_name="gemini-test",
+            segment_start_sec=0.0,
+            segment_end_sec=5.0,
+            actor="person",
+            active_hand="RIGHT",
+            objects=["box", "dining table"],
+            raw_action="pushing the box",
+            start_time_sec=1.0,
+            end_time_sec=4.0,
+            state_change="box slid across the table",
+            visible_facts="hand against the box",
+            inference="push",
+            uncertainty="none",
+            confidence=0.9,
+        )
+    ]
+
+    events = _extract_events_from_vlm_observations(ctx)
+    assert len(events) == 1
+    assert events[0].actor_track_id is None
+    # "box" is a substring of "cardboard box", and the table is excluded as scene.
+    assert events[0].object_track_id == 8
+    assert events[0].attributes["object_label"] == "box"
 
 
 def test_extract_events_skips_failed_observations():

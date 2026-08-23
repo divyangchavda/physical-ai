@@ -23,7 +23,11 @@
 output_dir: "/kaggle/working/runs/tt6_dino_hf"
 
 frame_sampling:
-  every_n_frames: 10        # tt6 is 996 frames @ 30fps -> ~100 detection frames
+  # Was 10. IoU association across a 10-frame gap fails for anything moving:
+  # a 400px box that travels 300px between detections has IoU ~0, well under
+  # tracker.iou_threshold, so the track dies and is reborn under a new id —
+  # 57 tracks for 4 real objects. Stride 3 keeps consecutive boxes overlapping.
+  every_n_frames: 3         # tt6 is 996 frames @ 30fps -> ~332 detection frames
 
 detector:
   backend: "groundingdino_hf"

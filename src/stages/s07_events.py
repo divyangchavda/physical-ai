@@ -82,32 +82,140 @@ def _map_raw_action_to_type(raw_action: str) -> ActionType:
         return ActionType.INSPECT
     if "moving" in raw_lower or "move" in raw_lower:
         return ActionType.MOVE
-    
+
     return ActionType.UNKNOWN
+
+
+# Both ends must be strictly inside the segment by this margin for the VLM's
+# reported offsets to count as localisation rather than an echo of the clip.
+_TIMING_EPSILON_SEC = 0.05
+
+
+def _timing_precision(obs) -> str:
+    """Classify whether the VLM actually localised the action within the clip.
+
+    A VLM handed an 8-second clip frequently returns offsets equal to the clip
+    bounds — it is describing the whole thing, not timing the action. Reporting
+    that as EXACT puts fabricated precision into the dataset, so only offsets
+    strictly inside the segment on *both* ends earn EXACT.
+    """
+    if obs.start_time_sec is None or obs.end_time_sec is None:
+        return "SEGMENT"
+    inside_start = obs.start_time_sec > obs.segment_start_sec + _TIMING_EPSILON_SEC
+    inside_end = obs.end_time_sec < obs.segment_end_sec - _TIMING_EPSILON_SEC
+    return "EXACT" if inside_start and inside_end else "SEGMENT"
+
+
+def _resolve_actor_track(
+    segment_tracks: list, person_classes: set[str]
+) -> int | None:
+    """Pick the person track that acts in this segment, or None.
+
+    Longest-lived track wins: under fragmentation one person becomes several
+    tracks, and the one with the most points is the best evidence of who was
+    present for the action. Returns None rather than guessing when the segment
+    contains no person track at all.
+    """
+    candidates = [
+        t for t in segment_tracks if t.class_name.lower() in person_classes
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda t: len(t.points)).track_id
+
+
+def _match_label(vlm_label: str, class_name: str) -> int:
+    """Score a VLM object phrase against a track class name. 0 = no match.
+
+    Bidirectional containment: the VLM says "box" for a "cardboard box" track,
+    and "the cardboard box" for a "box" one. Exact match scores highest so a
+    literal hit always beats a substring hit.
+    """
+    a = vlm_label.strip().lower()
+    b = class_name.strip().lower()
+    if not a or not b:
+        return 0
+    if a == b:
+        return 3
+    if b in a:
+        return 2
+    if a in b:
+        return 1
+    return 0
+
+
+def _resolve_object_track(
+    vlm_objects: list[str] | None,
+    segment_tracks: list,
+    person_classes: set[str],
+    background_classes: set[str],
+) -> tuple[int | None, str | None]:
+    """Resolve the manipulated object to a track id, or (None, label).
+
+    Walks ``vlm_objects`` in order because the prompt asks for primary
+    manipulated objects first. Scene classes are excluded — a "dining table"
+    is never what the hand is acting on. Returns the label even when no track
+    matches, so downstream stages can still say *what* went unresolved.
+    """
+    if not vlm_objects:
+        return None, None
+
+    excluded = person_classes | background_classes
+    candidates = [
+        t for t in segment_tracks if t.class_name.lower() not in excluded
+    ]
+
+    for label in vlm_objects:
+        scored = [
+            (_match_label(label, t.class_name), len(t.points), t.track_id)
+            for t in candidates
+        ]
+        scored = [s for s in scored if s[0] > 0]
+        if scored:
+            # Best label match first, then the longest-lived of those tracks.
+            best = max(scored, key=lambda s: (s[0], s[1]))
+            return best[2], label
+
+    return None, vlm_objects[0]
 
 
 def _extract_events_from_vlm_observations(ctx: PipelineContext) -> list[PhysicalEvent]:
     """Convert VLM observations to PhysicalEvent objects."""
     events = []
-    
+
     # Build segment to track mapping
     segment_track_map = {}
     for seg in ctx.candidate_segments:
         segment_track_map[seg.segment_id] = seg.track_ids
-    
+
+    track_by_id = {t.track_id: t for t in ctx.tracks}
+    person_classes = {c.lower() for c in ctx.config.segment.person_classes}
+    background_classes = {c.lower() for c in ctx.config.segment.background_classes}
+
     for obs in ctx.vlm_observations:
         if obs.status != VLMSegmentStatus.SUCCESS:
-            logger.debug("[%s] Skipping observation %s with status %s", 
+            logger.debug("[%s] Skipping observation %s with status %s",
                         STAGE, obs.observation_id, obs.status)
             continue
-        
-        # Extract track IDs from segment
-        track_ids = segment_track_map.get(obs.segment_id, [])
-        actor_track_id = track_ids[0] if track_ids else None
-        
+
+        # Resolve identities from the segment's tracks by class, never by list
+        # position — track_ids is ordered by track id, so track_ids[0] is
+        # whatever was detected first, not the actor.
+        segment_tracks = [
+            track_by_id[tid]
+            for tid in segment_track_map.get(obs.segment_id, [])
+            if tid in track_by_id
+        ]
+        actor_track_id = _resolve_actor_track(segment_tracks, person_classes)
+        object_track_id, object_label = _resolve_object_track(
+            obs.objects, segment_tracks, person_classes, background_classes
+        )
+
         # Map raw_action to ActionType
         action_type = _map_raw_action_to_type(obs.raw_action or "")
-        
+
+        timing_precision = _timing_precision(obs)
+
         # Create PhysicalEvent
         event = PhysicalEvent(
             event_id=f"evt_{uuid.uuid4().hex[:8]}",
@@ -118,7 +226,7 @@ def _extract_events_from_vlm_observations(ctx: PipelineContext) -> list[Physical
             source=f"vlm:{obs.backend.lower()}",
             is_estimated=True,
             actor_track_id=actor_track_id,
-            object_track_id=None,  # VLM doesn't provide object track IDs yet
+            object_track_id=object_track_id,
             start_sec=obs.start_time_sec if obs.start_time_sec is not None else obs.segment_start_sec,
             end_sec=obs.end_time_sec if obs.end_time_sec is not None else obs.segment_end_sec,
             attributes={
@@ -126,20 +234,22 @@ def _extract_events_from_vlm_observations(ctx: PipelineContext) -> list[Physical
                 "actor": obs.actor,
                 "active_hand": obs.active_hand,
                 "objects": obs.objects,
+                "object_label": object_label,
                 "state_change": obs.state_change,
                 "visible_facts": obs.visible_facts,
                 "inference": obs.inference,
                 "uncertainty": obs.uncertainty,
                 "model_name": obs.model_name,
+                "timing_precision": timing_precision,
             },
             review_status="PENDING"
         )
         events.append(event)
-        
+
         logger.debug("[%s] Created event %s: action=%s, confidence=%.2f, time=[%.1f, %.1f]s",
-                    STAGE, event.event_id, event.action, event.confidence, 
+                    STAGE, event.event_id, event.action, event.confidence,
                     event.start_sec, event.end_sec)
-    
+
     return events
 
 

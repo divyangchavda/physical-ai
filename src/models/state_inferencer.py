@@ -26,7 +26,13 @@ class StateInferencer:
     ) -> tuple[int | None, str | None, Literal["RESOLVED", "UNRESOLVED", "AMBIGUOUS"]]:
         """Resolve object identity conservatively."""
         if evt.object_track_id is not None:
-            return evt.object_track_id, None, "RESOLVED"
+            # s07 already matched the VLM phrase to a track. Carry its label
+            # through — dropping it left states.json with a null semantic_label
+            # on precisely the transitions that were fully resolved.
+            label = evt.attributes.get("object_label")
+            if not label and obs and obs.objects:
+                label = obs.objects[0]
+            return evt.object_track_id, label, "RESOLVED"
             
         if not obs or not obs.objects:
             return None, None, "UNRESOLVED"
