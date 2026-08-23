@@ -50,4 +50,9 @@ segment:
   max_segment_duration_sec: 10.0
 
 vlm:
-  enabled: false            # flip to true only after detection+tracking look right
+  enabled: true             # detection + tracking + segments verified; go end-to-end
+  backend: "GEMINI"
+  model_name: "gemini-3.1-flash-lite"
+  # ~220s per segment observed. 4 segments -> ~15 min for s06 alone. Needs
+  # GEMINI_API_KEY in the environment (Kaggle Secrets) and Internet ON.
+  max_retries: 1            # 2 retries x 220s per failing segment is too slow

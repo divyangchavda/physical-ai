@@ -25,6 +25,6 @@ tqdm>=4.66.0
 # Stage 06 — VLM local backend (model and provider TBD at VLM stage)
 # (install provider-specific package when model is selected)
 
-# Stage 06 — VLM remote backend (provider TBD at VLM stage)
-# (install provider-specific package when provider is selected)
+# Stage 06 — VLM remote backend
+google-genai>=1.0.0         # GeminiVLM; reads GEMINI_API_KEY from the environment
 ultralytics==8.4.120
