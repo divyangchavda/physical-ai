@@ -28,7 +28,7 @@ class FrameSamplingConfig(BaseModel):
 
 
 class DetectorConfig(BaseModel):
-    backend: str = "yolov8"    # "yolov8" | "yolo-world" | "groundingdino"
+    backend: str = "yolov8"    # "yolov8" | "yolo-world" | "groundingdino" | "groundingdino_hf"
     model: str = "yolov8n"     # configurable; ObjectDetector ABC is model-agnostic
     confidence: float = 0.35
     nms_iou: float = 0.45

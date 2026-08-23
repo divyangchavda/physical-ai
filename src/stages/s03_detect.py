@@ -42,7 +42,34 @@ def _build_detector(ctx: PipelineContext) -> ObjectDetector:
     backend = getattr(ctx.config.detector, 'backend', 'yolov8')
     
     try:
-        if backend == 'groundingdino':
+        if backend == 'groundingdino_hf':
+            from src.models.groundingdino_hf_detector import (
+                DEFAULT_MODEL_ID,
+                GroundingDINOHFDetector,
+            )
+
+            text_prompt = getattr(ctx.config.detector, 'text_prompt', None)
+            if not text_prompt:
+                logger.warning(
+                    "[%s] groundingdino_hf backend selected but no text_prompt "
+                    "provided; falling back to StubDetector", STAGE
+                )
+                return StubDetector()
+
+            # `model` doubles as the Hub id here; ignore the yolo default.
+            model_id = getattr(ctx.config.detector, 'model', None)
+            if not model_id or model_id.startswith('yolo'):
+                model_id = DEFAULT_MODEL_ID
+
+            return GroundingDINOHFDetector(
+                text_prompt=text_prompt,
+                box_threshold=ctx.config.detector.confidence,
+                text_threshold=getattr(ctx.config.detector, 'text_threshold', 0.25),
+                device=device,
+                model_id=model_id,
+            )
+
+        elif backend == 'groundingdino':
             from src.models.groundingdino_detector import GroundingDINODetector
             
             # Get text prompt from config

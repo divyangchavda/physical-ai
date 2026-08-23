@@ -1,0 +1,43 @@
+# KAGGLE — TT6, GroundingDINO via HuggingFace transformers + Kalman sparse tracking.
+#
+# Use this instead of config/kaggle_tt6_dino.yaml. The IDEA-Research repo needs
+# its MultiScaleDeformableAttention CUDA op compiled, which fails on Kaggle. The
+# transformers port is pure PyTorch:
+#
+#   - no compile step
+#   - no 660 MB checkpoint upload (weights come from the Hub, needs Internet ON)
+#   - grounding-dino-tiny is the same Swin-T backbone as groundingdino_swint_ogc.pth
+#
+# It also resolves grounded text spans against the prompt vocabulary explicitly,
+# so an unrecognised span lands in an `unmatched` bucket instead of silently
+# becoming class 0 (= "person" here).
+#
+# Verified environment (probe, 2026-08-23): Tesla T4 x2, torch 2.10.0+cu128,
+# transformers 5.0.0, videos at /kaggle/input/datasets/divyangchavda/pdc-videos/
+#
+# Usage on Kaggle:
+#   python -m src.pipeline \
+#       /kaggle/input/datasets/divyangchavda/pdc-videos/tt6.mp4 \
+#       --config config/kaggle_tt6_dino_hf.yaml --verbose
+
+output_dir: "/kaggle/working/runs/tt6_dino_hf"
+
+frame_sampling:
+  every_n_frames: 10        # tt6 is 996 frames @ 30fps -> ~100 detection frames
+
+detector:
+  backend: "groundingdino_hf"
+  model: "IDEA-Research/grounding-dino-tiny"   # or grounding-dino-base (Swin-B)
+  confidence: 0.20          # box threshold; low for recall
+  text_threshold: 0.25
+  text_prompt: "person . cardboard box . push chopper . dining table ."
+  device: "auto"
+
+tracker:
+  backend: "kalman_sparse"
+  iou_threshold: 0.20
+  max_age: 15
+  min_hits: 1
+
+vlm:
+  enabled: false            # flip to true only after detection+tracking look right
