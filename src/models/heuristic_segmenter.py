@@ -103,6 +103,22 @@ def check_movement(
     return moved, round(norm_disp, 3)
 
 
+def _split_long_segment(
+    start_sec: float, end_sec: float, max_duration: float
+) -> list[tuple[float, float]]:
+    """Split [start, end] into consecutive windows of at most *max_duration*."""
+    if max_duration <= 0 or (end_sec - start_sec) <= max_duration:
+        return [(start_sec, end_sec)]
+
+    total = end_sec - start_sec
+    n_windows = math.ceil(total / max_duration)
+    width = total / n_windows  # even split reads better than a short tail
+    return [
+        (start_sec + i * width, start_sec + (i + 1) * width)
+        for i in range(n_windows)
+    ]
+
+
 class RawHit:
     """An instantaneous candidate hit."""
     def __init__(self, frame_idx: int, timestamp_sec: float, p_id: int, o_id: int, signals: dict):
@@ -136,8 +152,12 @@ def generate_candidate_segments(
     for frame_idx in sorted(frame_to_points.keys()):
         points = frame_to_points[frame_idx]
         persons = [(t, p) for t, p in points if t.class_name in config.person_classes]
-        objects = [(t, p) for t, p in points if t.class_name not in config.person_classes]
-        
+        objects = [
+            (t, p) for t, p in points
+            if t.class_name not in config.person_classes
+            and t.class_name not in config.background_classes
+        ]
+
         for p_track, p_pt in persons:
             for o_track, o_pt in objects:
                 prox_ok, prox_info = check_proximity(
@@ -148,22 +168,33 @@ def generate_candidate_segments(
                     float(frame_width),
                     float(frame_height),
                 )
-                
+
                 if not prox_ok:
                     continue
-                    
+
+                # Either box moving is a deliberately loose gate. This stage is
+                # a *candidate generator*: it should over-produce and let the
+                # VLM adjudicate, since box geometry alone cannot separate
+                # interaction from co-presence. A stricter "the person→object
+                # relation must change" gate looks appealing but suppresses
+                # carrying, where the two move in lockstep. Precision comes
+                # from s06/s11; what matters here is that candidates stay
+                # bounded in length (max_segment_duration_sec) and that scene
+                # classes are not paired at all (background_classes).
                 p_moved, p_disp = check_movement(
-                    p_track, frame_idx, config.movement.window_frames, config.movement.threshold, float(frame_height)
+                    p_track, frame_idx, config.movement.window_frames,
+                    config.movement.threshold, float(frame_height)
                 )
                 o_moved, o_disp = check_movement(
-                    o_track, frame_idx, config.movement.window_frames, config.movement.threshold, float(frame_height)
+                    o_track, frame_idx, config.movement.window_frames,
+                    config.movement.threshold, float(frame_height)
                 )
-                
+
                 if p_moved or o_moved:
                     signals = {**prox_info}
                     signals["movement"] = p_disp if p_moved else o_disp
                     signals["movement_source"] = "person" if p_moved else "object"
-                    
+
                     hits.append(
                         RawHit(
                             frame_idx=frame_idx,
@@ -174,8 +205,9 @@ def generate_candidate_segments(
                         )
                     )
 
-    # Fallback: if no person-object interactions found, check solo person movement
-    if not hits:
+    # Fallback: if no person-object interactions found, check solo person movement.
+    # Off by default — see SegmentConfig.enable_solo_person_fallback.
+    if not hits and config.enable_solo_person_fallback:
         # For solo person, we need to compare across actual sampled frames, not small frame windows
         # The window_frames config is designed for dense video (every frame), but tracks may be sparse
         for frame_idx in sorted(frame_to_points.keys()):
@@ -246,37 +278,45 @@ def generate_candidate_segments(
             current = nxt
     merged.append(current)
     
-    # 5. Convert to CandidateSegment schemas
+    # 5. Convert to CandidateSegment schemas, splitting over-long merges
     results = []
-    for idx, m in enumerate(merged):
+    for m in merged:
         t_ids = set()
         for h in m["hits"]:
             t_ids.add(h.person_id)
             if h.object_id != -1:  # skip sentinel for solo person
                 t_ids.add(h.object_id)
-            
-        start_sec = m["start"]
-        end_sec = m["end"]
-        
-        # approximate frame range by looking at hits (min/max)
-        s_frame = min(h.frame_idx for h in m["hits"])
-        e_frame = max(h.frame_idx for h in m["hits"])
-        
+
         # extract first trigger reason as representative
         trigger_repr = m["hits"][0].signals.get("proximity_type", "unknown")
-        
-        seg = CandidateSegment(
-            segment_id=f"cand_{idx:04d}_{uuid.uuid4().hex[:6]}",
-            track_ids=sorted(t_ids),
-            start_frame=s_frame,
-            end_frame=e_frame,
-            start_sec=start_sec,
-            end_sec=end_sec,
-            trigger_reason=f"proximity_{trigger_repr}+movement",
-            confidence=0.5, # Configurable or calculated later; set to 0.5 as heuristic candidate
-            source="rule_based",
-            status="PENDING"
+
+        windows = _split_long_segment(
+            m["start"], m["end"], config.max_segment_duration_sec
         )
-        results.append(seg)
-        
+        for start_sec, end_sec in windows:
+            # Frame range from the hits that actually fall in this window; a
+            # split window must not claim the frames of its siblings.
+            window_hits = [
+                h for h in m["hits"] if start_sec <= h.timestamp_sec <= end_sec
+            ] or m["hits"]
+            window_t_ids = set()
+            for h in window_hits:
+                window_t_ids.add(h.person_id)
+                if h.object_id != -1:
+                    window_t_ids.add(h.object_id)
+
+            seg = CandidateSegment(
+                segment_id=f"cand_{len(results):04d}_{uuid.uuid4().hex[:6]}",
+                track_ids=sorted(window_t_ids),
+                start_frame=min(h.frame_idx for h in window_hits),
+                end_frame=max(h.frame_idx for h in window_hits),
+                start_sec=start_sec,
+                end_sec=end_sec,
+                trigger_reason=f"proximity_{trigger_repr}+movement",
+                confidence=0.5,  # heuristic candidate; scored later
+                source="rule_based",
+                status="PENDING"
+            )
+            results.append(seg)
+
     return results

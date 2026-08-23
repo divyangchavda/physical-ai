@@ -50,8 +50,15 @@ class DetectorConfig(BaseModel):
 class TrackerConfig(BaseModel):
     backend: str = "bytetrack"  # "bytetrack" | "kalman_sparse"
     iou_threshold: float = 0.20  # For kalman_sparse
-    max_age: int = 15  # For kalman_sparse
+    max_age: int = 15  # For kalman_sparse — frame floor, see max_missed_detections
     min_hits: int = 1  # For kalman_sparse
+    # kalman_sparse counts a "miss" on every frame without a matched detection,
+    # including interpolated frames where no detection ran. Under sparse
+    # detection (every_n_frames=10) max_age alone is meaningless: one missed
+    # detection leaves a track unmatched for ~2x the stride, so it is deleted
+    # and re-created under a new id. This budgets lifetime in *detection
+    # opportunities* instead, and s04 derives the stride from the sampling plan.
+    max_missed_detections: int = 2
 
 
 class VLMConfig(BaseModel):
@@ -104,8 +111,22 @@ class SegmentMovementConfig(BaseModel):
 
 class SegmentConfig(BaseModel):
     person_classes: list[str] = ["person"]
+    # Scene/furniture classes that are never the *target* of a manipulation.
+    # A dining table box covers 60% of a top-down frame, so every person box
+    # overlaps it on every frame and proximity fires continuously — which is
+    # how tt6 collapsed into a single 33-second segment. List such classes here
+    # to keep them out of the object side of the pairing.
+    background_classes: list[str] = []
     proximity: SegmentProximityConfig = Field(default_factory=SegmentProximityConfig)
     movement: SegmentMovementConfig = Field(default_factory=SegmentMovementConfig)
+    # Hard cap on merged segment length. The VLM costs ~220s per segment, so
+    # one 33s segment buys a single mush answer for the whole video. Long runs
+    # of hits are split into windows of at most this length.
+    max_segment_duration_sec: float = 10.0
+    # Emit segments for a person moving with no object nearby. Off by default:
+    # a person merely moving is not a physical interaction, and this fallback
+    # fires whenever the real heuristics find nothing, masking the failure.
+    enable_solo_person_fallback: bool = False
     temporal_padding_sec: float = 2.0
     merge_gap_sec: float = 1.0
 

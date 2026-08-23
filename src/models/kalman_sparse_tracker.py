@@ -17,7 +17,6 @@ Key features:
 from __future__ import annotations
 
 import numpy as np
-from scipy.linalg import block_diag
 
 from src.interfaces.tracker import ObjectTracker
 from src.logging_utils import get_logger
@@ -27,7 +26,13 @@ from src.schema.track import Track, TrackPoint
 logger = get_logger(__name__)
 
 
-# Supported class names (filter out malformed labels)
+# Legacy hard-coded vocabulary. Kept only so tools/validate_kalman_tracker.py
+# keeps working; KalmanSparseTracker no longer uses it by default.
+#
+# This used to be applied unconditionally, which silently dropped every
+# detection from any video whose prompt was not the tt6 prompt — the tracker
+# would report 0 tracks with no warning. Class filtering belongs upstream: the
+# detector now resolves grounded spans against the prompt vocabulary itself.
 SUPPORTED_CLASSES = {
     "person",
     "cardboard box",
@@ -36,14 +41,24 @@ SUPPORTED_CLASSES = {
 }
 
 
-def filter_detection(detection: Detection) -> Detection | None:
-    """Filter out detections with unsupported class names.
-    
+def filter_detection(
+    detection: Detection,
+    allowed_classes: set[str] | None = SUPPORTED_CLASSES,
+) -> Detection | None:
+    """Filter out detections whose class is not in *allowed_classes*.
+
+    Args:
+        detection: The detection to test.
+        allowed_classes: Lower-cased class names to keep. None disables
+            filtering entirely and every detection passes through.
+
     Returns:
-        Detection if class is supported, None otherwise
+        Detection if the class is allowed, None otherwise.
     """
+    if allowed_classes is None:
+        return detection
     class_name = detection.class_name.strip().lower()
-    if class_name in SUPPORTED_CLASSES:
+    if class_name in allowed_classes:
         return detection
     return None
 
@@ -113,11 +128,13 @@ class KalmanBoxTracker:
         q_pos = 1.0    # position noise
         q_size = 10.0  # size noise
         q_vel = 100.0  # velocity noise
-        
-        self.Q = block_diag(
-            q_pos * np.eye(2),   # cx, cy noise
-            q_size * np.eye(2),  # w, h noise
-            q_vel * np.eye(4)    # velocity noise
+
+        # Every block is a scalar multiple of the identity, so this is just a
+        # diagonal matrix. Built with numpy rather than scipy.linalg.block_diag
+        # because scipy was never in requirements.txt — importing it made
+        # s04 fall back to StubTracker on any clean install.
+        self.Q = np.diag(
+            [q_pos, q_pos, q_size, q_size, q_vel, q_vel, q_vel, q_vel]
         ).astype(np.float32)
         
         # Measurement noise covariance
@@ -328,20 +345,58 @@ class KalmanSparseTracker(ObjectTracker):
         min_hits: int = 1,
         frame_width: int | None = None,
         frame_height: int | None = None,
+        detection_stride: int = 1,
+        max_missed_detections: int = 2,
+        allowed_classes: set[str] | None = None,
     ):
+        """
+        Args:
+            iou_threshold: Minimum IoU for a detection to match a track.
+            max_age: Frames a track may go unmatched before deletion. Only a
+                floor — see detection_stride below.
+            min_hits: Detections required before a track is reported.
+            frame_width/frame_height: For clamping predicted boxes.
+            detection_stride: Frames between detection attempts (i.e.
+                frame_sampling.every_n_frames). `consecutive_misses` ticks up on
+                every frame, including the interpolated ones where no detection
+                was even attempted, so with a stride of 10 a track that misses
+                ONE detection sits unmatched for ~20 frames before its next
+                chance. A max_age below that kills every track on its first
+                miss and re-creates it as a new id — which is exactly how tt6
+                produced 60 tracks for 4 real objects.
+            max_missed_detections: How many consecutive *detection
+                opportunities* a track may miss before deletion. This is the
+                knob that actually controls track lifetime under sparse
+                detection; max_age only acts as a lower bound.
+            allowed_classes: Lower-cased class names to keep. None (default)
+                accepts every class — filtering belongs in the detector, which
+                already resolves spans against the prompt vocabulary.
+        """
         self.iou_threshold = iou_threshold
         self.max_age = max_age
         self.min_hits = min_hits
         self.frame_width = frame_width
         self.frame_height = frame_height
-        
+        self.allowed_classes = allowed_classes
+
+        self.detection_stride = max(1, detection_stride)
+        self.max_missed_detections = max(0, max_missed_detections)
+        # Budget expressed in frames, derived from detection opportunities.
+        self.max_unmatched_frames = max(
+            max_age, self.detection_stride * (self.max_missed_detections + 1)
+        )
+
         self.tracks: dict[int, KalmanTrack] = {}
         self.next_track_id = 1
         self.frame_count = 0
-        
+
         logger.info(
-            "KalmanSparseTracker initialized: iou_threshold=%.2f, max_age=%d, min_hits=%d, frame_dims=%sx%s",
-            iou_threshold, max_age, min_hits, frame_width, frame_height
+            "KalmanSparseTracker initialized: iou_threshold=%.2f, max_age=%d, "
+            "min_hits=%d, frame_dims=%sx%s, detection_stride=%d, "
+            "max_missed_detections=%d -> deleting after %d unmatched frames",
+            iou_threshold, max_age, min_hits, frame_width, frame_height,
+            self.detection_stride, self.max_missed_detections,
+            self.max_unmatched_frames,
         )
     
     def update(
@@ -352,8 +407,11 @@ class KalmanSparseTracker(ObjectTracker):
         """Update tracker with detections (or empty list) for current frame."""
         self.frame_count += 1
         
-        # Filter detections to only supported classes
-        filtered_detections = [d for d in detections if filter_detection(d) is not None]
+        # Filter detections to only allowed classes (no-op when None)
+        filtered_detections = [
+            d for d in detections
+            if filter_detection(d, self.allowed_classes) is not None
+        ]
         
         if len(detections) != len(filtered_detections):
             logger.debug(
@@ -402,7 +460,7 @@ class KalmanSparseTracker(ObjectTracker):
         # Step 5: Delete old tracks
         tracks_to_delete = []
         for track_id, track in self.tracks.items():
-            if track.consecutive_misses > self.max_age:
+            if track.consecutive_misses > self.max_unmatched_frames:
                 tracks_to_delete.append(track_id)
         
         for track_id in tracks_to_delete:
