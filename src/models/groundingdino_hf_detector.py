@@ -52,6 +52,8 @@ class GroundingDINOHFDetector(ObjectDetector):
         text_threshold: float = 0.25,
         device: str = "cuda",
         model_id: str = DEFAULT_MODEL_ID,
+        nms_iou: float | None = 0.45,
+        drop_unlabeled: bool = True,
     ) -> None:
         """
         Args:
@@ -62,11 +64,20 @@ class GroundingDINOHFDetector(ObjectDetector):
             device: "cuda" or "cpu" (already resolved by s03_detect).
             model_id: Hub id. `grounding-dino-tiny` (Swin-T) or
                 `grounding-dino-base` (Swin-B, larger and slower).
+            nms_iou: Per-class NMS IoU threshold. GroundingDINO decodes 900
+                queries independently and the HF post-processor applies no
+                NMS, so several queries routinely return near-identical boxes
+                for one object. Set None to disable.
+            drop_unlabeled: Discard boxes whose grounded text span is empty.
+                These pass box_threshold but no token clears text_threshold,
+                so they carry no class information and are useless downstream.
         """
         self.box_threshold = box_threshold
         self.text_threshold = text_threshold
         self.device = device
         self.model_id = model_id
+        self.nms_iou = nms_iou
+        self.drop_unlabeled = drop_unlabeled
 
         self.model = None
         self.processor = None
@@ -91,10 +102,15 @@ class GroundingDINOHFDetector(ObjectDetector):
         self.text_prompt = ". ".join(self.labels) + "."
 
         self._unmatched_spans: dict[str, int] = {}
+        self._n_dropped_unlabeled = 0
+        self._n_suppressed_nms = 0
+        self._n_kept = 0
 
         logger.info(
-            "GroundingDINO-HF: %d labels %s (unmatched bucket -> class_id %d)",
+            "GroundingDINO-HF: %d labels %s (unmatched bucket -> class_id %d, "
+            "nms_iou=%s, drop_unlabeled=%s)",
             len(self.labels), self.labels, self._unmatched_id,
+            self.nms_iou, self.drop_unlabeled,
         )
 
     # ────────────────────────────────────────────────────────────── lifecycle
@@ -144,6 +160,12 @@ class GroundingDINOHFDetector(ObjectDetector):
                 dict(sorted(self._unmatched_spans.items(),
                             key=lambda kv: -kv[1])[:10]),
             )
+        total = self._n_kept + self._n_dropped_unlabeled + self._n_suppressed_nms
+        logger.info(
+            "GroundingDINO-HF filtering: %d raw -> %d kept "
+            "(%d dropped unlabeled, %d suppressed by NMS)",
+            total, self._n_kept, self._n_dropped_unlabeled, self._n_suppressed_nms,
+        )
         logger.info("GroundingDINO-HF unloaded")
 
     @property
@@ -194,6 +216,33 @@ class GroundingDINOHFDetector(ObjectDetector):
             # Older transformers named it box_threshold.
             return fn(outputs, box_threshold=self.box_threshold, **common)[0]
 
+    # ─────────────────────────────────────────────────────────────────── NMS
+    def _apply_nms(
+        self, kept: list[tuple[float, float, float, float, float, int, str]]
+    ) -> list[tuple[float, float, float, float, float, int, str]]:
+        """Per-class NMS. Falls back to keeping everything if torchvision is absent.
+
+        Class-aware rather than class-agnostic: a person standing at a table
+        legitimately overlaps the table box, and suppressing one because of the
+        other would delete a real object.
+        """
+        try:
+            from torchvision.ops import batched_nms
+        except ImportError:
+            logger.warning("torchvision unavailable — skipping NMS")
+            self.nms_iou = None  # do not retry on every frame
+            return kept
+
+        boxes = torch.tensor([k[:4] for k in kept], dtype=torch.float32)
+        scores = torch.tensor([k[4] for k in kept], dtype=torch.float32)
+        class_ids = torch.tensor([k[5] for k in kept], dtype=torch.int64)
+
+        keep_idx = batched_nms(boxes, scores, class_ids, self.nms_iou).tolist()
+        self._n_suppressed_nms += len(kept) - len(keep_idx)
+        # batched_nms returns descending-score order; restore prompt/spatial
+        # order so detections.json stays stable across runs.
+        return [kept[i] for i in sorted(keep_idx)]
+
     # ──────────────────────────────────────────────────────────────── detect
     def detect(
         self,
@@ -223,7 +272,8 @@ class GroundingDINOHFDetector(ObjectDetector):
             # transformers >= 4.51 returns "text_labels"; older returns "labels".
             spans = result.get("text_labels") or result.get("labels") or []
 
-            detections: list[Detection] = []
+            # ── 1. clamp, drop degenerate + unlabeled boxes ──────────────────
+            kept: list[tuple[float, float, float, float, float, int, str]] = []
             for box, score, span in zip(boxes, scores, spans):
                 # Already absolute xyxy because target_sizes was supplied.
                 x1, y1, x2, y2 = (float(v) for v in box)
@@ -235,8 +285,23 @@ class GroundingDINOHFDetector(ObjectDetector):
                 if x2 <= x1 or y2 <= y1:
                     continue
 
-                class_id, class_name = self._resolve_class(str(span))
+                text = str(span).strip().strip(".").strip()
+                if not text and self.drop_unlabeled:
+                    # Cleared box_threshold but no token cleared text_threshold,
+                    # so there is no class to attach. Useless downstream.
+                    self._n_dropped_unlabeled += 1
+                    continue
 
+                class_id, class_name = self._resolve_class(text)
+                kept.append((x1, y1, x2, y2, float(score), class_id, class_name))
+
+            # ── 2. per-class NMS ────────────────────────────────────────────
+            if self.nms_iou is not None and len(kept) > 1:
+                kept = self._apply_nms(kept)
+
+            # ── 3. build Detection objects ──────────────────────────────────
+            detections: list[Detection] = []
+            for x1, y1, x2, y2, score, class_id, class_name in kept:
                 detections.append(
                     Detection(
                         detection_id=f"dinohf_{frame_index}_{uuid.uuid4().hex[:8]}",
@@ -245,11 +310,12 @@ class GroundingDINOHFDetector(ObjectDetector):
                         bbox=BoundingBox(x1=x1, y1=y1, x2=x2, y2=y2),
                         class_id=class_id,
                         class_name=class_name,
-                        confidence=min(1.0, max(0.0, float(score))),
+                        confidence=min(1.0, max(0.0, score)),
                         source=self.model_name,
                         is_estimated=True,
                     )
                 )
+            self._n_kept += len(detections)
             return detections
 
         except Exception:

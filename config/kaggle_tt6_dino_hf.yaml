@@ -32,6 +32,8 @@ detector:
   text_threshold: 0.25
   text_prompt: "person . cardboard box . push chopper . dining table ."
   device: "auto"
+  nms_iou: 0.45             # per-class NMS; HF post-processor applies none
+  drop_unlabeled: true      # discard boxes whose grounded span is empty
 
 tracker:
   backend: "kalman_sparse"

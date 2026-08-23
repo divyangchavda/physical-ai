@@ -36,6 +36,11 @@ class DetectorConfig(BaseModel):
     vocabulary: list[str] | None = None  # YOLO-World custom vocabulary
     text_prompt: str | None = None  # GroundingDINO text prompt (e.g., "person . box . table .")
     text_threshold: float = 0.25  # GroundingDINO text matching threshold
+    # GroundingDINO decodes 900 queries independently and the HF post-processor
+    # applies no NMS, so several queries return near-identical boxes for one
+    # object. Boxes with an empty grounded span cleared the box threshold but
+    # matched no text, so they carry no class. Both are filtered by default.
+    drop_unlabeled: bool = True
     # GroundingDINO weights/config location. None → ~/GroundingDINO/ defaults.
     # Set these to read weights from a read-only mount (e.g. Kaggle /kaggle/input/...).
     model_checkpoint: str | None = None

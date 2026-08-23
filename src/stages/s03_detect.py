@@ -67,6 +67,8 @@ def _build_detector(ctx: PipelineContext) -> ObjectDetector:
                 text_threshold=getattr(ctx.config.detector, 'text_threshold', 0.25),
                 device=device,
                 model_id=model_id,
+                nms_iou=ctx.config.detector.nms_iou,
+                drop_unlabeled=getattr(ctx.config.detector, 'drop_unlabeled', True),
             )
 
         elif backend == 'groundingdino':
