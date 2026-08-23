@@ -1,0 +1,30 @@
+# TT6 — GroundingDINO sparse detection + Kalman prediction experiment
+# 
+# Experiment goal:
+#   Test sparse detection (every 10 frames) with Kalman filter prediction
+#   to maintain track continuity across detection gaps
+#
+# Video: tt6.mp4 (996 frames @ 30 FPS)
+# Detection: Every 10 frames (~100 detection frames)
+# Tracking: Every frame with Kalman prediction (996 tracked frames)
+
+output_dir: "output_tt6_dino_kalman"
+
+frame_sampling:
+  every_n_frames: 10  # Sample every 10 frames for detection
+
+detector:
+  backend: "groundingdino"
+  confidence: 0.20  # Lower threshold for better recall
+  text_threshold: 0.25  # GroundingDINO text matching threshold
+  text_prompt: "person . cardboard box . push chopper . dining table ."
+  device: "auto"
+
+tracker:
+  backend: "kalman_sparse"
+  iou_threshold: 0.20  # IoU threshold for data association
+  max_age: 15  # Maximum frames without detection before track deletion
+  min_hits: 1  # Minimum detections to create a track
+
+vlm:
+  enabled: false  # Disable VLM for detector/tracker experiment

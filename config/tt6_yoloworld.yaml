@@ -1,0 +1,19 @@
+# TT6 — YOLO-World open-vocabulary experiment
+output_dir: "output_tt6_yoloworld"
+
+detector:
+  backend: "yolo-world"
+  model: "yolov8s-world"
+  confidence: 0.35
+  nms_iou: 0.45
+  device: "auto"
+  vocabulary:
+    - "person"
+    - "cardboard box"
+    - "push chopper"
+    - "table"
+
+vlm:
+  enabled: true
+  backend: "GEMINI"
+  model_name: "gemini-3.1-flash-lite"

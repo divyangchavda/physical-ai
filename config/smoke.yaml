@@ -1,0 +1,32 @@
+# SMOKE TEST — fastest possible end-to-end run to prove the code path works.
+#
+# Purpose: burn ~30 seconds, not GPU quota. Run this BEFORE any real experiment
+# so a crash in stage 11 is found now instead of after 20 minutes of detection.
+#
+# Everything expensive is off: COCO detector (no download of DINO weights),
+# no VLM (no ~220s/segment API calls), very coarse sampling.
+#
+# Usage:
+#   python -m src.pipeline data/videos/tt3.mp4 --config config/smoke.yaml --verbose
+
+output_dir: "runs/smoke"
+
+frame_sampling:
+  every_n_frames: 60      # ~2 frames/sec of video at 30fps → very few frames
+  max_frames: 20          # hard cap: never more than 20 frames
+
+detector:
+  backend: "yolov8"       # COCO, small, already downloaded
+  model: "yolov8n"
+  confidence: 0.35
+  device: "auto"
+
+tracker:
+  backend: "bytetrack"
+
+vlm:
+  enabled: false          # the expensive part — off
+
+# NOTE: there is no `preview` config section yet, so s14_preview always runs.
+# It is cheap at 20 frames. Do not add `preview:` here — unknown top-level keys
+# are silently dropped by the Pydantic config, which hides typos.

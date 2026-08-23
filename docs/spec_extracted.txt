@@ -1,0 +1,1157 @@
+
+===== PAGE 1 =====
+Physical Data Compiler
+MVP Technical Specification & Engineering Brief
+Role: CTO-level product/architecture specification
+Implementation agent: Senior Developer / Claude Code
+Status: MVP / Experimental
+Primary objective: Validate the core technical thesis before scaling.
+1. Vision
+We are building a Physical Data Compiler.
+Our long-term vision:
+Turn messy physical-world video into structured, trustworthy data that robotics and
+Physical AI systems can use for training, evaluation, and analysis.
+We are NOT initially trying to build:
+a humanoid robot
+a robotics foundation model
+a general-purpose VLM
+a robot-control model
+a large-scale data-collection company
+We are building the data intelligence layer between raw physical-world recordings and robotics AI
+systems.
+Conceptually:
+RAW PHYSICAL-WORLD VIDEO
+        ↓
+Physical Data Compiler
+        ↓
+Perception
+        ↓
+Tracking
+        ↓
+Temporal Understanding
+        ↓
+Action Understanding
+• 
+• 
+• 
+• 
+• 
+1
+
+===== PAGE 2 =====
+        ↓
+Human/Object Interaction
+        ↓
+State Transitions
+        ↓
+Trajectories
+        ↓
+Quality / Confidence
+        ↓
+Structured Physical Dataset
+        ↓
+Robotics / Physical AI
+2. Core Hypothesis
+The startup hypothesis is:
+Can software turn messy physical video into a structured physical representation that is
+accurate enough and cheap enough to be useful?
+The first experiment must answer only this question.
+We are deliberately NOT attempting to prove that the resulting data can already train a humanoid robot.
+That comes later .
+3. MVP Objective
+Build a working pipeline that takes:
+ONE ~10-MINUTE VIDEO
+and produces:
+detections
+tracks
+candidate action segments
+physical actions
+object interactions
+state transitions
+2
+
+===== PAGE 3 =====
+trajectories
+confidence scores
+structured episode JSON
+visual validation output
+evaluation metrics
+The system must be executable locally.
+Example:
+python-msrc.pipelineinput/video.mp4
+Expected result:
+output/
+    detections.json
+    tracks.json
+    candidate_segments.json
+    events.json
+    states.json
+    trajectories.json
+    episode.json
+    evaluation.json
+    preview.mp4
+4. Hardware Constraints
+Development environment:
+RAM:       8 GB
+SSD:       ~520 GB
+GPU:       NVIDIA 4 GB VRAM
+Budget:    ₹0
+AWS:       Free usage available for approximately 6 months
+Therefore:
+3
+
+===== PAGE 4 =====
+Important
+Do NOT design the MVP assuming:
+16–24 GB VRAM
+multi-GPU
+local 7B/14B+ models
+continuous full-resolution VLM processing
+distributed infrastructure
+The architecture must be resource-aware.
+Heavy inference may be selectively executed on AWS or an external inference endpoint if required.
+5. MVP Philosophy
+The MVP should be:
+LOCAL-FIRST
+SEQUENTIAL
+SIMPLE
+MEASURABLE
+REPRODUCIBLE
+Do NOT build:
+frontend
+authentication
+billing
+SaaS
+database
+Kubernetes
+microservices
+Redis
+Kafka
+production API
+cloud orchestration
+distributed workers
+unless absolutely required for the experiment.
+A Python CLI is sufficient.
+• 
+• 
+• 
+• 
+• 
+• 
+• 
+• 
+• 
+• 
+• 
+• 
+• 
+• 
+• 
+• 
+• 
+4
+
+===== PAGE 5 =====
+6. Architecture
+                         INPUT VIDEO
+                              │
+                              ▼
+                     ┌─────────────────┐
+                     │ Video Ingestion │
+                     └────────┬────────┘
+                              │
+                              ▼
+                     Frame Sampling
+                              │
+                              ▼
+                     ┌─────────────────┐
+                     │ Object Detection│
+                     └────────┬────────┘
+                              │
+                              ▼
+                     ┌─────────────────┐
+                     │ Object Tracking │
+                     └────────┬────────┘
+                              │
+                              ▼
+                  Candidate Interaction Segments
+                              │
+                              ▼
+                     ┌─────────────────┐
+                     │ VLM Analysis    │
+                     └────────┬────────┘
+                              │
+                              ▼
+                    Physical Event Extraction
+                              │
+                              ▼
+                    Event Normalization
+                              │
+                              ▼
+                    Interaction Graph
+                              │
+                              ▼
+                    State Transition Engine
+                              │
+                              ▼
+                    Trajectory Extraction
+                              │
+5
+
+===== PAGE 6 =====
+                              ▼
+                    Quality / Confidence
+                              │
+                              ▼
+                    Physical Episode Schema
+                              │
+                              ▼
+                    Evaluation / Ground Truth
+                              │
+                              ▼
+                    Structured Dataset
+7. Model Strategy
+Critical architectural principle
+We are NOT training a large model for the MVP .
+We use existing models as specialized components.
+Conceptually:
+Existing Models
+       +
+Our Orchestration
+       +
+Our Physical Representation
+       +
+Our Temporal Reasoning
+       +
+Our Quality System
+       =
+Physical Data Compiler
+Later , if evaluation shows that a particular component consistently fails, we may train a specialized model
+for that component.
+8. Initial Technology Stack
+Use Python.
+6
+
+===== PAGE 7 =====
+Recommended libraries:
+Python 3.10+
+PyTorch
+OpenCV
+FFmpeg
+NumPy
+Pandas
+Pydantic
+Ultralytics
+ByteTrack
+Do not add dependencies unless they solve a demonstrated requirement.
+9. Component 1 — Video Ingestion
+Responsibility
+Read the input video and extract:
+duration
+FPS
+resolution
+frame count
+codec information
+timestamps
+Use:
+FFmpeg
+PyAV
+OpenCV
+Prefer FFmpeg/PyAV for reliable video handling.
+Example:
+ffprobeinput/video.mp4
+• 
+• 
+• 
+• 
+• 
+• 
+7
+
+===== PAGE 8 =====
+10. Component 2 — Frame Sampling
+Do NOT initially process every frame.
+A 10-minute video at 30 FPS contains approximately:
+18,000 frames
+Initial sampling:
+1 frame / second
+Result:
+~600 frames
+Use these low-frequency frames for initial scene understanding.
+If a candidate interaction is detected, process that temporal segment at a higher FPS.
+Concept:
+10-minute video
+      ↓
+1 FPS sampling
+      ↓
+candidate interaction
+      ↓
+high-resolution temporal analysis
+This is critical for keeping compute low.
+11. Component 3 — Object Detection
+Initial model
+Use a lightweight:
+YOLO model through Ultralytics
+8
+
+===== PAGE 9 =====
+Purpose:
+Detect:
+people
+common objects
+tools
+furniture/environment objects
+Example:
+person
+box
+table
+bottle
+tool
+machine
+Do NOT start with Grounding DINO unless YOLO proves insufficient.
+Reason:
+The MVP needs speed and low resource usage more than maximum open-vocabulary capability.
+12. Component 4 — Object Tracking
+Initial tracker:
+ByteTrack
+Pipeline:
+YOLO
+ ↓
+detections
+ ↓
+ByteTrack
+ ↓
+persistent object IDs
+Example:
+• 
+• 
+• 
+• 
+9
+
+===== PAGE 10 =====
+frame 100 → box_01
+frame 101 → box_01
+frame 102 → box_01
+frame 103 → box_01
+Output:
+{
+"object_id": "box_01",
+"class": "box",
+"frames": [100, 101, 102, 103],
+"trajectory_2d": [...]
+}
+13. Component 5 — Human Pose
+Initial candidate:
+RTMPose or ViTPose
+Purpose:
+Estimate body keypoints.
+However , this component is OPTIONAL for the first successful run.
+If the video/task does not require detailed body pose, do not spend compute unnecessarily.
+14. Component 6 — Hand Tracking
+Initial lightweight option:
+MediaPipe Hands
+Later candidates:
+HaMeR
+The MVP only needs enough hand information to help determine:
+10
+
+===== PAGE 11 =====
+hand → object
+Do not attempt perfect 3D hand reconstruction initially.
+15. Component 7 — Segmentation
+Do NOT initially require SAM 2.
+Bounding boxes + tracking are sufficient for the first experiment.
+If the MVP demonstrates that bounding boxes are insufficient for action/interaction understanding, add:
+SAM 2
+as the next iteration.
+16. Component 8 — Depth
+Do NOT initially require depth.
+If the source video has actual RGB-D/depth data, preserve it.
+Otherwise, later evaluate:
+Depth Anything V2
+Important:
+Estimated depth must be marked as estimated.
+Never represent estimated depth as ground-truth physical measurement.
+17. Component 9 — Candidate Segment Detection
+We should NOT send the whole 10-minute video to a VLM.
+Use detections/tracking to identify interesting periods.
+Example:
+11
+
+===== PAGE 12 =====
+person
+   +
+object
+   +
+close spatial relationship
+   +
+movement
+creates a candidate segment.
+Example:
+42.0s → 49.0s
+Only this segment is sent for deeper semantic analysis.
+18. Component 10 — Vision-Language Model
+Purpose:
+Convert a candidate video segment into semantic physical events.
+The VLM should NOT control the whole pipeline.
+It answers narrow questions.
+Example prompt:
+Analyze this physical interaction segment.
+Identify:
+1. the acting person
+2. the relevant hand if visible
+3. the objects involved
+4. the physical actions
+5. approximate action start/end times
+6. whether the object state changed
+Return ONLY valid JSON using the provided schema.
+12
+
+===== PAGE 13 =====
+Do not invent information that cannot be observed.
+Use null/unknown when evidence is insufficient.
+Initial model
+Benchmark an accessible open Qwen-VL/Qwen vision-language model.
+Do NOT assume a specific large local model can run on the 4 GB GPU.
+The implementation should support:
+LOCAL_MODEL
+and:
+REMOTE_MODEL
+through a common interface.
+This lets us use AWS or an inference endpoint without changing the rest of the pipeline.
+19. Model Abstraction
+Create an interface:
+classVisionLanguageModel:
+defanalyze_segment(self, video_path, prompt) ->dict:
+...
+Implement:
+QwenVLLocal
+QwenVLRemote
+or equivalent adapters.
+The rest of the application must not care which model is being used.
+This is important because the model will change during research.
+13
+
+===== PAGE 14 =====
+20. Physical Action Vocabulary
+For MVP , use a small controlled vocabulary.
+Initial actions:
+GRASP
+RELEASE
+PICK
+PLACE
+MOVE
+PUSH
+PULL
+OPEN
+CLOSE
+INSERT
+REMOVE
+USE_TOOL
+TOUCH
+INSPECT
+Do not create hundreds of labels.
+Unknown actions must be allowed:
+UNKNOWN
+Do not force the model to hallucinate a known action.
+21. Physical Event Representation
+Every event should have:
+event_id
+episode_id
+action
+agent
+hand
+object
+start_time
+14
+
+===== PAGE 15 =====
+end_time
+confidence
+source
+Example:
+{
+"event_id": "evt_001",
+"action": "GRASP",
+"agent": "person_01",
+"hand": "right",
+"object": "box_01",
+"start_time": 42.3,
+"end_time": 43.1,
+"confidence": 0.91,
+"source": "vlm"
+}
+22. Component 11 — Event Normalizer
+The VLM may return:
+"grabbed"
+"picked up"
+"took"
+"held"
+Our system maps these to controlled actions.
+Example:
+grabbed
+picked up
+grasped
+        ↓
+GRASP
+This normalization layer belongs to our system.
+15
+
+===== PAGE 16 =====
+It should be deterministic wherever possible.
+23. Component 12 — Interaction Graph
+Create relationships such as:
+PERSON_01
+    ↓
+RIGHT_HAND
+    ↓
+GRASP
+    ↓
+BOX_01
+Represent this as structured data.
+Example:
+{
+"source": "person_01.right_hand",
+"relation": "GRASP",
+"target": "box_01",
+"timestamp": 42.3
+}
+This is an important part of the eventual Physical Data Representation.
+24. Component 13 — State Transition Engine
+The core abstraction:
+STATE A
+   ↓
+ACTION
+   ↓
+STATE B
+Example:
+16
+
+===== PAGE 17 =====
+Before:
+{
+"box_01": {
+"location": "table",
+"held": false
+}
+}
+Action:
+GRASP(box_01)
+After:
+{
+"box_01": {
+"location": "hand",
+"held": true
+}
+}
+For MVP , use:
+VLM observations
+tracking
+deterministic rules
+Do not train a separate state model yet.
+25. Component 14 — Trajectory Extraction
+For every tracked entity:
+time
+x
+y
+Store a 2D trajectory.
+Example:
+• 
+• 
+• 
+17
+
+===== PAGE 18 =====
+{
+"entity_id": "box_01",
+"representation": "2d",
+"points": [
+{
+"t": 42.3,
+"x": 412,
+"y": 311
+},
+{
+"t": 42.4,
+"x": 418,
+"y": 316
+}
+]
+}
+Do not claim this is a real 3D physical trajectory.
+Later:
+RGB + depth
+can produce:
+x,y,z
+26. Component 15 — Quality Engine
+Every extracted event must have confidence information.
+Potential signals:
+detection_confidence
+tracking_quality
+visibility
+VLM_confidence
+temporal_consistency
+state_consistency
+18
+
+===== PAGE 19 =====
+Example:
+{
+"event_id": "evt_001",
+"quality": {
+"detection": 0.94,
+"tracking": 0.91,
+"semantic": 0.93,
+"temporal": 0.88,
+"overall": 0.91
+}
+}
+Initial policy:
+>= 0.90
+    AUTO_ACCEPT
+0.60–0.90
+    HUMAN_REVIEW
+< 0.60
+    REJECT / REPROCESS
+These thresholds are experimental, not industry standards.
+They must be configurable.
+27. Component 16 — Physical Episode Schema
+Create one canonical internal representation.
+Example:
+{
+"episode_id": "ep_0001",
+"source": {
+"video": "video.mp4",
+"duration": 600.2,
+"fps": 30
+},
+19
+
+===== PAGE 20 =====
+"task": {
+"name": "pick_and_place"
+},
+"entities": [],
+"events": [],
+"interactions": [],
+"state_transitions": [],
+"trajectories": [],
+"quality": {}
+}
+This schema is OUR internal contract.
+Keep it versioned:
+schema_version: "0.1"
+28. Dataset Export
+Do not invent the final robotics dataset format.
+Our internal representation should eventually compile to existing formats.
+Initial target:
+LeRobot-compatible structure
+Later:
+RLDS
+customer-specific schemas
+robotics research formats
+The internal schema and export layer must remain separate.
+• 
+• 
+• 
+20
+
+===== PAGE 21 =====
+29. Evaluation System
+Evaluation is mandatory.
+We cannot say the MVP works because the JSON looks good.
+Create a small manually labeled ground-truth dataset.
+For approximately 2 minutes of the video:
+Human annotates:
+action
+object
+start time
+end time
+interaction
+state
+Then compare generated output.
+30. Initial Metrics
+Measure:
+Object accuracy
+Correct object identification.
+Action accuracy
+Correct physical action.
+Temporal IoU
+Compare predicted action intervals with ground truth.
+Interaction accuracy
+Correct:
+21
+
+===== PAGE 22 =====
+hand → object
+person → object
+tool → target
+State accuracy
+Correct before/after state.
+Human correction rate
+How much generated data requires human correction?
+This metric is commercially important.
+31. Initial Success Criteria
+These are experimental MVP targets:
+Action accuracy:       >= 90%
+Object accuracy:       >= 90%
+Temporal IoU:          >= 80%
+Interaction accuracy:  >= 85%
+Human correction:      <= 20%
+If these are not achieved, do NOT immediately add more models.
+First identify exactly where the pipeline fails.
+32. Failure Analysis
+Every failure should be recorded.
+Example:
+{
+"prediction": "GRASP",
+"ground_truth": "TOUCH",
+"failure_type": "action_confusion",
+22
+
+===== PAGE 23 =====
+"component": "VLM"
+}
+Build a failure report:
+GRASP        92%
+PLACE        89%
+MOVE         95%
+PUSH         71%
+CONTACT      61%
+This tells us what to improve.
+33. When Should We Train Our Own Model?
+Only after repeated evidence.
+Process:
+Existing model
+      ↓
+Evaluation
+      ↓
+Repeated systematic failure
+      ↓
+Collect examples
+      ↓
+Determine whether failure is model-specific
+      ↓
+Train specialized model
+      ↓
+Benchmark against existing model
+Example:
+If:
+GRASP = 95%
+PLACE = 94%
+CONTACT = 58%
+23
+
+===== PAGE 24 =====
+then contact detection may become our first proprietary model.
+Do NOT train a foundation model.
+Train narrow models for demonstrated weaknesses.
+34. Infrastructure
+MVP infrastructure:
+                 Git repository
+                       │
+                       ▼
+                 Python CLI
+                       │
+              ┌────────┴────────┐
+              ↓                 ↓
+           Laptop              AWS
+              │                 │
+        lightweight       heavy inference
+          processing
+              │                 │
+              └────────┬────────┘
+                       ↓
+                    outputs
+                       ↓
+                  evaluation
+No database is necessary.
+No server is necessary.
+No cloud architecture is necessary.
+Use the AWS free resources only when local hardware is insufficient.
+35. Local/Cloud Strategy
+Local:
+24
+
+===== PAGE 25 =====
+FFmpeg
+frame sampling
+YOLO
+ByteTrack
+data processing
+evaluation
+schema generation
+Cloud/remote:
+large VLM inference
+experiments requiring >4 GB VRAM
+Use a provider abstraction so cloud usage can be changed without rewriting the pipeline.
+36. Project Structure
+Use:
+physical-data-compiler/
+│
+├── input/
+│   └── video.mp4
+│
+├── output/
+│
+├── src/
+│   ├── __init__.py
+│   ├── pipeline.py
+│   ├── config.py
+│   │
+│   ├── video/
+│   │   ├── metadata.py
+│   │   └── sampler.py
+│   │
+│   ├── perception/
+│   │   ├── detector.py
+│   │   ├── tracker.py
+│   │   ├── pose.py
+│   │   └── segmentation.py
+│   │
+25
+
+===== PAGE 26 =====
+│   ├── semantics/
+│   │   ├── vlm.py
+│   │   ├── actions.py
+│   │   └── normalizer.py
+│   │
+│   ├── physical/
+│   │   ├── interactions.py
+│   │   ├── states.py
+│   │   └── trajectories.py
+│   │
+│   ├── quality/
+│   │   └── evaluator.py
+│   │
+│   └── export/
+│       └── lerobot.py
+│
+├── schemas/
+│   └── episode.py
+│
+├── tests/
+│
+├── requirements.txt
+├── README.md
+└── .gitignore
+Do not over-engineer this structure if it slows implementation.
+37. First Implementation Order
+Implement exactly in this order:
+Step 1
+Video metadata.
+Step 2
+Frame sampling.
+Step 3
+YOLO detection.
+26
+
+===== PAGE 27 =====
+Step 4
+ByteTrack.
+Step 5
+Generate visualization showing tracked objects.
+Step 6
+Identify candidate interaction segments.
+Step 7
+VLM analysis.
+Step 8
+Normalize actions.
+Step 9
+Generate interactions.
+Step 10
+Generate state transitions.
+Step 11
+Generate trajectories.
+Step 12
+Generate episode.json.
+Step 13
+Create ground truth.
+Step 14
+Run evaluation.
+27
+
+===== PAGE 28 =====
+Step 15
+Generate failure report.
+38. What Claude Code Must NOT Do
+Do not:
+Build a web application.
+Build a production API.
+Build authentication.
+Add a database.
+Build Kubernetes infrastructure.
+Train a foundation model.
+Download huge models unnecessarily.
+Process every frame at full resolution.
+Add expensive cloud services.
+Add five alternative models before benchmarking one.
+Pretend estimated 3D information is ground truth.
+Claim the output is robot-training-ready before validation.
+39. Engineering Principle
+Every component must answer:
+What problem does this solve, and how will we measure whether it works?
+If a component cannot answer that question, do not add it.
+40. Model Replacement Principle
+Every AI model must be behind an interface.
+Example:
+classObjectDetector:
+defdetect(self, frame):
+raiseNotImplementedError
+1. 
+2. 
+3. 
+4. 
+5. 
+6. 
+7. 
+8. 
+9. 
+10. 
+11. 
+12. 
+28
+
+===== PAGE 29 =====
+Then:
+YOLODetector
+GroundingDINODetector
+can implement the same interface.
+Likewise:
+classActionRecognizer:
+defanalyze(self, segment):
+...
+This allows us to benchmark models without changing the pipeline.
+41. Important distinction: Orchestration vs
+Intelligence
+Our orchestration is not the product by itself.
+The eventual intelligence comes from:
+Model outputs
++
+temporal alignment
++
+physical relationships
++
+state reasoning
++
+trajectory reasoning
++
+quality scoring
++
+proprietary data
+The system should gradually learn which model is best for which task.
+Eventually:
+29
+
+===== PAGE 30 =====
+                     INPUT
+                       ↓
+                ROUTING ENGINE
+                       ↓
+        ┌──────────────┼──────────────┐
+        ↓              ↓              ↓
+      Model A        Model B        Model C
+     detection       VLM          geometry
+        ↓              ↓              ↓
+        └──────────────┼──────────────┘
+                       ↓
+               PHYSICAL ENGINE
+                       ↓
+                  DATASET
+42. Long-Term Product
+If MVP succeeds, the eventual product could become:
+Upload physical-world recordings
+              ↓
+Automatic processing
+              ↓
+Physical event discovery
+              ↓
+Action / object / interaction extraction
+              ↓
+State transitions
+              ↓
+Trajectory extraction
+              ↓
+Quality scoring
+              ↓
+Human review only for uncertain cases
+              ↓
+Training-ready dataset
+              ↓
+API / export
+The customer could eventually upload:
+factory footage• 
+30
+
+===== PAGE 31 =====
+warehouse footage
+worker recordings
+egocentric recordings
+robot recordings
+teleoperation recordings
+maintenance footage
+training videos
+43. Long-Term Moat
+Initial:
+Open models
++
+our orchestration
+Then:
+Customer data
+       ↓
+Failures
+       ↓
+Human corrections
+       ↓
+Proprietary dataset
+       ↓
+Specialized models
+       ↓
+Better extraction
+       ↓
+Better dataset
+Eventually:
+More customers
+      ↓
+More physical data
+      ↓
+More edge cases
+      ↓
+Better proprietary models
+      ↓
+• 
+• 
+• 
+• 
+• 
+• 
+• 
+31
+
+===== PAGE 32 =====
+Higher quality
+      ↓
+More customers
+This is the intended data flywheel.
+44. What Success Looks Like
+Experiment 1
+10-minute video
+Goal:
+Reliable physical event extraction
+Experiment 2
+1 hour
+Goal:
+Robustness across longer footage
+Experiment 3
+10 hours
+Goal:
+Compute cost + annotation savings + quality
+Experiment 4
+100+ hours
+Goal:
+32
+
+===== PAGE 33 =====
+Commercial dataset economics
+Experiment 5
+Give the dataset to a robotics researcher/company.
+Question:
+Does this data actually improve a downstream robotics model or reduce their data-
+labeling cost?
+That is the real product validation.
+45. First Deliverable From Claude Code
+Claude Code should NOT attempt the entire startup.
+The first deliverable should be:
+A working local CLI that:
+1. accepts video.mp4
+2. extracts metadata
+3. samples frames
+4. detects objects with lightweight YOLO
+5. tracks objects with ByteTrack
+6. generates a tracking visualization
+7. identifies candidate interaction segments
+8. sends selected segments to a VLM
+9. produces structured physical events
+10. creates episode.json
+11. produces a preview.mp4
+12. provides basic evaluation tooling
+13. documents setup and limitations
+The system must be runnable with a simple command.
+46. First Technical Milestone
+The first milestone is:
+33
+
+===== PAGE 34 =====
+video.mp4
+    ↓
+pipeline
+    ↓
+episode.json
+    +
+preview.mp4
+    +
+evaluation.json
+If Claude cannot reliably produce this, do not add more architecture.
+Fix the current bottleneck.
+47. CTO Evaluation Criteria
+When reviewing Claude Code's implementation, evaluate:
+Engineering
+Does it run locally?
+Does it respect 4 GB VRAM?
+Does it avoid unnecessary compute?
+Is the code modular?
+Can models be replaced?
+Data
+Are timestamps preserved?
+Are object IDs persistent?
+Are events structured?
+Are uncertainty/confidence represented?
+Are hallucinated values prevented?
+Scientific validity
+Is there ground truth?
+Are metrics reproducible?
+Are failures recorded?
+Is the model actually being evaluated?
+Startup relevance
+Most importantly:
+• 
+• 
+• 
+• 
+• 
+• 
+• 
+• 
+• 
+• 
+• 
+• 
+• 
+• 
+34
+
+===== PAGE 35 =====
+Does this experiment tell us whether our startup hypothesis is true?
+48. Final Instruction to the Developer
+Treat this document as the technical north star for the MVP.
+Do not optimize for impressive architecture.
+Optimize for:
+FASTEST VALID EXPERIMENT
+        ↓
+MEASURABLE RESULT
+        ↓
+FAILURE ANALYSIS
+        ↓
+NEXT TECHNICAL DECISION
+The goal is not to prove that we can build a massive Physical AI platform.
+The goal is to prove one thing:
+Messy physical-world video can be automatically converted into a structured physical
+representation with sufficient accuracy and sufficiently low human effort to create
+economic value.
+If the 10-minute experiment succeeds, we scale.
+If it partially succeeds, we identify the bottleneck.
+If it fails, we determine exactly why.
+Do not hide failures. The failures are the most valuable output of this experiment.
+35

@@ -1,0 +1,30 @@
+# Physical Data Compiler — core runtime dependencies
+#
+# ─── PyTorch (install separately to match your CUDA version) ───────────────
+# Visit: https://pytorch.org/get-started/locally/
+# Example for CUDA 12.1 (4 GB VRAM GPU):
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# CPU-only fallback:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+# ──────────────────────────────────────────────────────────────────────────
+
+numpy>=1.24.0
+opencv-python>=4.8.0
+pydantic>=2.5.0
+PyYAML>=6.0
+tqdm>=4.66.0
+
+# ─── Optional: uncomment when implementing the corresponding stage ─────────
+
+# Stage 03 — Object detection & Stage 04 — Tracking
+# ultralytics>=8.2.0        # provides YOLO models + ByteTrack
+
+# Stage 13 — Preview video rendering
+# ffmpeg-python>=0.2.0      # requires system FFmpeg: https://ffmpeg.org/download.html
+
+# Stage 06 — VLM local backend (model and provider TBD at VLM stage)
+# (install provider-specific package when model is selected)
+
+# Stage 06 — VLM remote backend (provider TBD at VLM stage)
+# (install provider-specific package when provider is selected)
+ultralytics==8.4.120

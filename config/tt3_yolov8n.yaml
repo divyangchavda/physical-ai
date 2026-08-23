@@ -1,0 +1,13 @@
+# TT3 — YOLOv8n baseline configuration
+output_dir: "output_tt3_yolov8n"
+
+detector:
+  model: "yolov8n"
+  confidence: 0.35
+  nms_iou: 0.45
+  device: "auto"
+
+vlm:
+  enabled: true
+  backend: "GEMINI"
+  model_name: "gemini-3.1-flash-lite"

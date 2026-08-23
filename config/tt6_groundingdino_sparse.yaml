@@ -1,0 +1,28 @@
+# TT6 — GroundingDINO sparse detection + ByteTrack interpolation experiment
+# 
+# Experiment goal:
+#   Test sparse detection (every 10 frames) with dense tracking (every frame)
+#   to validate ByteTrack interpolation capability
+#
+# Video: tt6.mp4 (996 frames @ 30 FPS)
+# Detection: Every 10 frames (~3 FPS) = ~100 detection frames
+# Tracking: Every frame (30 FPS) = 996 tracked frames
+# Interpolation ratio: ~90%
+
+output_dir: "output_tt6_dino_sparse"
+
+frame_sampling:
+  every_n_frames: 10  # Sample every 10 frames for detection
+
+detector:
+  backend: "groundingdino"
+  confidence: 0.20  # Lower threshold for better recall
+  text_threshold: 0.25  # GroundingDINO text matching threshold
+  text_prompt: "person . cardboard box . push chopper . dining table ."
+  device: "auto"
+
+tracker:
+  backend: "bytetrack"
+
+vlm:
+  enabled: false  # Disable VLM for detector/tracker experiment

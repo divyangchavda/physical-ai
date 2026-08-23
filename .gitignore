@@ -1,0 +1,72 @@
+# ─── Secrets (NEVER commit) ──────────────────────────────────────────────
+.env
+*.env
+!.env.example
+kaggle.json
+
+# ─── Large binaries: videos, weights ─────────────────────────────────────
+# Videos live locally in data/videos/ and are uploaded to Kaggle as a Dataset.
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+data/videos/
+data/
+
+# Model weights (GroundingDINO .pth is ~660 MB, YOLO .pt ~6-27 MB)
+*.pt
+*.pth
+*.onnx
+*.bin
+*.safetensors
+weights/
+
+# ─── Pipeline outputs ────────────────────────────────────────────────────
+runs/
+output/
+output_*/
+out/
+*.log
+probe_result.json
+results.zip
+
+# ─── Vendored third-party source (cloned on demand) ──────────────────────
+GroundingDINO/
+ssh-remote/
+
+# ─── Python ──────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# ─── Node (stray) ────────────────────────────────────────────────────────
+node_modules/
+package.json
+package-lock.json
+
+# ─── IDE / OS ────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+.kiro/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─── Junk from malformed shell redirects (e.g. `pip install lap>=0.5.12`) ─
+=*

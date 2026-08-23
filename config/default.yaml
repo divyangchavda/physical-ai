@@ -1,0 +1,48 @@
+# Physical Data Compiler — default pipeline configuration
+#
+# Override via CLI:   python -m src.pipeline video.mp4 --set key.sub=value
+# Override via file:  python -m src.pipeline video.mp4 --config my_config.yaml
+#
+# Data integrity rules encoded here:
+#   - Confidence thresholds below affect the QUALITY ENGINE only.
+#     Raw predictions (action + confidence + source) are ALWAYS preserved.
+#   - UNKNOWN action is used when evidence is genuinely insufficient,
+#     not as a confidence-threshold fallback.
+#   - All inferred values carry is_estimated=true.
+#   - Stub/skipped stages report status=SKIPPED; no data is fabricated.
+
+output_dir: "output"
+device: "auto"       # auto → cuda if available, else cpu
+stub_mode: false     # if true, all heavy AI stages use stubs (no inference)
+
+frame_sampling:
+  fps: 1.0           # 1 frame/sec → ~600 frames for a 10-minute video (spec default)
+  max_frames: 1200   # hard cap; prevents OOM on long recordings
+  segment_fps: 5.0   # fps used when re-sampling candidate segments for VLM
+
+detector:
+  model: "yolov8n"   # configurable; ObjectDetector ABC is model-independent
+  confidence: 0.35   # minimum detection confidence to keep
+  nms_iou: 0.45      # NMS IoU threshold
+  device: "auto"     # inherits global device setting
+
+tracker:
+  backend: "bytetrack"
+
+vlm:
+  enabled: true      # enabled for Gemini testing
+  backend: "GEMINI"  # LOCAL_MODEL | REMOTE_MODEL | GEMINI
+  model_name: "gemini-3.1-flash-lite"  # Gemini model
+  timeout_sec: 60.0
+  max_retries: 2
+
+pose:
+  enabled: false     # optional hand/body pose estimation; disabled by default
+
+event:
+  # Quality engine thresholds — used by s10_score.py ONLY.
+  # These do NOT cause auto-rejection of raw predictions.
+  # Raw action + confidence + source are ALWAYS preserved in events.json.
+  auto_accept_threshold: 0.70     # review_status → AUTO_ACCEPT
+  human_review_threshold: 0.40   # below this → REJECT/REPROCESS
+  # Events in between → HUMAN_REVIEW

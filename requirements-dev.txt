@@ -1,0 +1,4 @@
+# Physical Data Compiler — development and testing dependencies
+-r requirements.txt
+pytest>=7.4.0
+ruff>=0.4.0

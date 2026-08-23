@@ -1,0 +1,39 @@
+# KAGGLE — TT6 GroundingDINO + Kalman, reading weights from a read-only dataset mount.
+#
+# Differs from config/tt6_groundingdino_kalman.yaml in exactly one way:
+# the GroundingDINO checkpoint and config are given as ABSOLUTE Kaggle paths,
+# so nothing needs to be copied to ~/GroundingDINO/.
+#
+# Assumes:
+#   /kaggle/input/pdc-weights/groundingdino_swint_ogc.pth   (your uploaded Dataset)
+#   /kaggle/working/GroundingDINO/                          (cloned source, for the .py config)
+#
+# Usage on Kaggle:
+#   python -m src.pipeline /kaggle/input/pdc-videos/tt6.mp4 \
+#       --config config/kaggle_tt6_dino.yaml \
+#       --output-dir /kaggle/working/runs/tt6_dino \
+#       --verbose
+
+output_dir: "/kaggle/working/runs/tt6_dino"
+
+frame_sampling:
+  every_n_frames: 10
+
+detector:
+  backend: "groundingdino"
+  confidence: 0.20
+  text_threshold: 0.25
+  text_prompt: "person . cardboard box . push chopper . dining table ."
+  device: "auto"
+  # Absolute paths — override the ~/GroundingDINO/ defaults.
+  model_checkpoint: "/kaggle/input/pdc-weights/groundingdino_swint_ogc.pth"
+  config_file: "/kaggle/working/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py"
+
+tracker:
+  backend: "kalman_sparse"
+  iou_threshold: 0.20
+  max_age: 15
+  min_hits: 1
+
+vlm:
+  enabled: false   # flip to true once detection+tracking are confirmed good
