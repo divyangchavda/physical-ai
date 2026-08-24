@@ -9,6 +9,7 @@ import json
 import re
 import time
 import uuid
+from pathlib import Path
 
 from src.context import PipelineContext
 from src.logging_utils import get_logger
@@ -70,9 +71,85 @@ def _write_output(ctx: PipelineContext, status: str = "OK") -> None:
         json.dump(data, f, indent=2)
 
 
+# Segment bounds are rounded to this many decimals to build the replay join key.
+# Bounds come out as 24.900000000000002 from float accumulation, so an exact
+# comparison would miss.
+_REPLAY_PRECISION = 2
+
+
+def _bounds_key(start_sec: float, end_sec: float) -> tuple[float, float]:
+    return (round(start_sec, _REPLAY_PRECISION), round(end_sec, _REPLAY_PRECISION))
+
+
+def _replay_observations(
+    ctx: PipelineContext, path: str
+) -> tuple[list[RawVLMObservation], str | None]:
+    """Rebind a prior run's observations onto this run's segments.
+
+    Segment ids cannot be the join key: heuristic_segmenter mints them as
+    ``f"cand_{i:04d}_{uuid4().hex[:6]}"``, so the suffix is new every run. The
+    time bounds are stable for the same video and are what s07 has to agree
+    with, so match on rounded bounds and rewrite segment_id to this run's value.
+
+    Returns ``(observations, error)``. A segment that finds no match is an
+    error rather than an omission — replaying nothing silently would present as
+    a clean run that happened to produce no events.
+    """
+    file_path = Path(path)
+    if not file_path.is_file():
+        return [], f"replay_from file not found: {file_path}"
+
+    try:
+        raw = json.loads(file_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return [], f"replay_from file unreadable: {exc}"
+
+    # s06 writes a bare list; some stages wrap their output in a dict.
+    if isinstance(raw, dict):
+        raw = raw.get("observations", [])
+    if not isinstance(raw, list) or not raw:
+        return [], f"replay_from file holds no observations: {file_path}"
+
+    by_bounds: dict[tuple[float, float], dict] = {}
+    for record in raw:
+        if not isinstance(record, dict):
+            continue
+        start, end = record.get("segment_start_sec"), record.get("segment_end_sec")
+        if start is None or end is None:
+            continue
+        by_bounds.setdefault(_bounds_key(float(start), float(end)), record)
+
+    observations: list[RawVLMObservation] = []
+    missing: list[str] = []
+    for seg in ctx.candidate_segments:
+        record = by_bounds.get(_bounds_key(seg.start_sec, seg.end_sec))
+        if record is None:
+            missing.append(f"{seg.segment_id} [{seg.start_sec:.2f},{seg.end_sec:.2f}]")
+            continue
+        try:
+            obs = RawVLMObservation.model_validate(record)
+        except ValueError as exc:
+            return [], f"replayed observation failed validation: {exc}"
+        # Backend and model_name are left as recorded: that is the true
+        # provenance of this text. Only the segment binding is rewritten.
+        observations.append(obs.model_copy(update={
+            "segment_id": seg.segment_id,
+            "segment_start_sec": seg.start_sec,
+            "segment_end_sec": seg.end_sec,
+        }))
+
+    if missing:
+        return [], (
+            f"replay_from has no observation for {len(missing)} segment(s): "
+            + "; ".join(missing)
+        )
+
+    return observations, None
+
+
 def run(ctx: PipelineContext) -> PipelineStageStatus:
     t0 = time.monotonic()
-    
+
     if not hasattr(ctx, "candidate_segments") or ctx.candidate_segments is None:
         msg = "No candidate_segments — s05_segment must run first"
         logger.error("[%s] %s", STAGE, msg)
@@ -102,6 +179,34 @@ def run(ctx: PipelineContext) -> PipelineStageStatus:
         return PipelineStageStatus(
             stage=STAGE, status="SKIPPED",
             message="VLM stage skipped",
+            duration_sec=time.monotonic() - t0,
+        )
+
+    # Replay before any backend is constructed, so no client is built and no
+    # request is made.
+    replay_path = getattr(ctx.config.vlm, "replay_from", None)
+    if replay_path:
+        observations, error = _replay_observations(ctx, replay_path)
+        if error:
+            logger.error("[%s] %s", STAGE, error)
+            ctx.vlm_observations = []
+            return PipelineStageStatus(
+                stage=STAGE, status="ERROR", message=error,
+                duration_sec=time.monotonic() - t0,
+            )
+        ctx.vlm_observations = observations
+        _write_output(ctx)
+        success_count = sum(
+            1 for o in observations if o.status == VLMSegmentStatus.SUCCESS
+        )
+        logger.info(
+            "[%s] REPLAY from %s | %d segments matched by bounds, %d SUCCESS "
+            "— no model was called",
+            STAGE, replay_path, len(observations), success_count,
+        )
+        return PipelineStageStatus(
+            stage=STAGE, status="OK",
+            message=f"Replayed {len(observations)} observations from {replay_path}",
             duration_sec=time.monotonic() - t0,
         )
 

@@ -68,6 +68,11 @@ class VLMConfig(BaseModel):
     api_base_url: str | None = None
     timeout_sec: float = 60.0
     max_retries: int = 2
+    # Path to a prior run's vlm_observations.json. When set, s06 replays that
+    # file instead of calling the model, so a code change is the only variable
+    # between two runs. Gemini is not reproducible even at temperature 0 with a
+    # fixed seed, so this is the only way to verify a downstream fix.
+    replay_from: str | None = None
 
 
 class EventExtractionConfig(BaseModel):
