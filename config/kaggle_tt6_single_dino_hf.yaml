@@ -1,0 +1,53 @@
+# KAGGLE — the SOURCE CLIP of tt6 on its own (~8.3s, 249 frames).
+#
+# tt6.mp4 is this clip copied four times. Running the single copy removes the
+# hard cuts, so every track break is real fragmentation rather than a splice,
+# and the 7 hand labels line up 1:1 with no folding arithmetic anywhere.
+#
+# It is a cleaner test bed, not a replacement. One copy samples the VLM once,
+# so a lucky run scores 100% on a model that is right half the time — keep
+# scoring tt6.mp4 as well, which is where that variance shows.
+#
+# Identical to kaggle_tt6_dino_hf.yaml except for output_dir and the note on
+# segmentation below. Every detector and tracker value is deliberately shared:
+# changing two things at once would make a score difference unattributable.
+#
+# Usage on Kaggle:
+#   python -m src.pipeline /kaggle/input/<...>/tt6_single.mp4 \
+#       --config config/kaggle_tt6_single_dino_hf.yaml --verbose
+
+output_dir: "/kaggle/working/runs/tt6_single_dino_hf"
+
+frame_sampling:
+  every_n_frames: 3         # ~83 detection frames over the 249-frame clip
+
+detector:
+  backend: "groundingdino_hf"
+  model: "IDEA-Research/grounding-dino-tiny"
+  confidence: 0.20
+  text_threshold: 0.25
+  text_prompt: "person . cardboard box . push chopper . dining table ."
+  device: "auto"
+  nms_iou: 0.45
+  drop_unlabeled: true
+
+tracker:
+  backend: "kalman_sparse"
+  iou_threshold: 0.20
+  max_age: 15
+  min_hits: 3
+  max_missed_detections: 5
+
+segment:
+  person_classes: ["person"]
+  background_classes: ["dining table"]
+  # The whole clip is 8.3s, under this bound, so the run produces ONE segment
+  # holding all 7 labelled actions. That is the sharpest possible statement of
+  # the recall problem: one event per segment caps recall at 1/7 here.
+  max_segment_duration_sec: 10.0
+
+vlm:
+  enabled: true
+  backend: "GEMINI"
+  model_name: "gemini-3.1-flash-lite"
+  max_retries: 1

@@ -1,0 +1,124 @@
+{
+  "_provenance": [
+    "Hand-labelled by the repository owner on 2026-08-24 after watching tt6.mp4.",
+    "The seven actions are the owner's own words and choices, unedited, copied",
+    "verbatim from tt6_ground_truth.json -- the SAME labels, since tt6.mp4 is",
+    "this clip repeated four times.",
+    "",
+    "This file exists so the source clip can be run on its own. repeats=1, so",
+    "ground truth is 7 actions and the times are already absolute: no folding,",
+    "no copy boundaries, and every track break is real fragmentation rather",
+    "than a hard cut. That makes it the cleaner test bed -- but it also samples",
+    "the VLM once instead of four times, so a lucky run reads 100%. Keep scoring",
+    "tt6.mp4 as well; that is where VLM variance is visible.",
+    "",
+    "Do not edit these labels to make a score look better. If they disagree with",
+    "the pipeline, the pipeline is what is wrong."
+  ],
+  "_known_limitations": [
+    "action 'FOLD' is NOT in src/schema/event.py ActionType. The vocabulary has",
+    "no word for folding a box flap, which is a real gap for packing tasks, not",
+    "a labelling mistake. The scorer reports it as NOT_IN_VOCABULARY rather than",
+    "quietly rewriting it to CLOSE.",
+    "",
+    "action 7 uses direction 'OFF' for lifting the box and moving it aside. The",
+    "template offered no value for a lateral move. That is a shortcoming of the",
+    "template, and 'OFF' is kept as written."
+  ],
+  "video_file": "tt6_single.mp4",
+  "total_duration_sec": 8.3,
+  "repeats": 1,
+  "people_visible": 1,
+  "objects_visible": [
+    "push chopper",
+    "cardboard box",
+    "dining table"
+  ],
+  "timing_tolerance_sec": 1.0,
+  "actions": [
+    {
+      "order": 1,
+      "i_see": "my left hand puts the cardboard box on the dining table",
+      "action": "PLACE",
+      "object": "cardboard box",
+      "target": "dining table",
+      "direction": "ONTO",
+      "hand": "LEFT",
+      "start_sec": 0.0,
+      "end_sec": 0.5,
+      "note": ""
+    },
+    {
+      "order": 2,
+      "i_see": "my right hand grabs the push chopper and lifts it slightly from the table to about the height of the box",
+      "action": "PICK",
+      "object": "push chopper",
+      "target": "dining table",
+      "direction": "OFF",
+      "hand": "RIGHT",
+      "start_sec": 0.5,
+      "end_sec": 1.0,
+      "note": ""
+    },
+    {
+      "order": 3,
+      "i_see": "my right hand puts the push chopper inside the cardboard box",
+      "action": "INSERT",
+      "object": "push chopper",
+      "target": "cardboard box",
+      "direction": "INTO",
+      "hand": "RIGHT",
+      "start_sec": 1.0,
+      "end_sec": 2.0,
+      "note": ""
+    },
+    {
+      "order": 4,
+      "i_see": "my hands fold the upper open folds of the cardboard box",
+      "action": "FOLD",
+      "object": "cardboard box",
+      "target": "",
+      "direction": "NONE",
+      "hand": "BOTH",
+      "start_sec": 2.0,
+      "end_sec": 3.0,
+      "note": ""
+    },
+    {
+      "order": 5,
+      "i_see": "my hands fold the cardboard box closed",
+      "action": "CLOSE",
+      "object": "cardboard box",
+      "target": "",
+      "direction": "NONE",
+      "hand": "BOTH",
+      "start_sec": 3.0,
+      "end_sec": 4.0,
+      "note": ""
+    },
+    {
+      "order": 6,
+      "i_see": "my hands grab the cardboard box",
+      "action": "GRASP",
+      "object": "cardboard box",
+      "target": "",
+      "direction": "NONE",
+      "hand": "BOTH",
+      "start_sec": 4.0,
+      "end_sec": 5.0,
+      "note": ""
+    },
+    {
+      "order": 7,
+      "i_see": "my hands lift the cardboard box from the dining table and move it to the left side of me",
+      "action": "MOVE",
+      "object": "cardboard box",
+      "target": "left side of person",
+      "direction": "OFF",
+      "hand": "BOTH",
+      "start_sec": 5.0,
+      "end_sec": 7.0,
+      "note": ""
+    }
+  ]
+}
