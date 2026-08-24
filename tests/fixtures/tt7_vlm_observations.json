@@ -1,0 +1,28 @@
+[
+  {
+    "observation_id": "obs_051accac",
+    "segment_id": "cand_0000_12adf7",
+    "status": "SUCCESS",
+    "error_reason": null,
+    "backend": "GEMINI",
+    "model_name": "gemini-3.1-flash-lite",
+    "prompt_version": "v1",
+    "segment_start_sec": 0.0,
+    "segment_end_sec": 6.666666666666667,
+    "raw_response": "{\n  \"actor\": \"person wearing a blue SpongeBob t-shirt\",\n  \"active_hand\": \"BOTH\",\n  \"objects\": [\"push chopper\", \"cardboard box\"],\n  \"raw_action\": \"placing the push chopper into the cardboard box and closing the lid\",\n  \"start_time_sec\": 0.0,\n  \"end_time_sec\": 6.0,\n  \"state_change\": \"the push chopper is now inside the closed box\",\n  \"visible_facts\": \"the person places the chopper into the box and folds the cardboard flaps to close the box\",\n  \"inference\": \"the person is packing the product back into its original packaging\",\n  \"uncertainty\": \"none\",\n  \"confidence\": 1.0\n}",
+    "actor": "person wearing a blue SpongeBob t-shirt",
+    "active_hand": "BOTH",
+    "objects": [
+      "push chopper",
+      "cardboard box"
+    ],
+    "raw_action": "placing the push chopper into the cardboard box and closing the lid",
+    "start_time_sec": 0.0,
+    "end_time_sec": 6.0,
+    "state_change": "the push chopper is now inside the closed box",
+    "visible_facts": "the person places the chopper into the box and folds the cardboard flaps to close the box",
+    "inference": "the person is packing the product back into its original packaging",
+    "uncertainty": "none",
+    "confidence": 1.0
+  }
+]
