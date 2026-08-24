@@ -145,12 +145,32 @@ class QualityScorer:
                 traj_support * 0.20
             )
             
-            if composite >= config.auto_accept_threshold:
+            # A component reading 0.0 means one leg of the claim has no evidence
+            # at all. The weighted average buries that: a factually wrong event
+            # with state_evidence=0.0 still scored 0.75 and auto-accepted. A zero
+            # caps the tier at HUMAN_REVIEW however good the composite looks.
+            zeroed = [
+                name for name, value in (
+                    ("action_certainty", action_cert),
+                    ("actor_resolution", actor_res),
+                    ("object_resolution", object_res),
+                    ("state_evidence", state_ev),
+                    ("timing_precision", timing_prec),
+                    ("trajectory_support", traj_support),
+                ) if value == 0.0
+            ]
+
+            if composite >= config.auto_accept_threshold and not zeroed:
                 tier = "AUTO_ACCEPT"
             elif composite >= config.human_review_threshold:
                 tier = "HUMAN_REVIEW"
             else:
                 tier = "REJECT"
+
+            if zeroed and composite >= config.auto_accept_threshold:
+                reasons.append(
+                    "Capped at HUMAN_REVIEW: no evidence for " + ", ".join(zeroed)
+                )
                 
             provenance = QualityProvenance(
                 graph_edge_id=edge.edge_id if edge else None,

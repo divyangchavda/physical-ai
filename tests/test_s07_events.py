@@ -10,6 +10,7 @@ from src.schema.track import Track, TrackPoint
 from src.schema.vlm import RawVLMObservation, VLMSegmentStatus
 from src.stages.s07_events import (
     _map_raw_action_to_type,
+    _match_action,
     _order_objects_by_action,
     _extract_events_from_vlm_observations,
 )
@@ -342,6 +343,31 @@ def test_extract_events_complex_action():
     assert event.confidence == 1.0
     assert event.attributes["raw_action"] == "folding and assembling the sides of a cardboard box"
 
+
+
+def test_compound_action_object_comes_from_the_matched_clause():
+    """Event 2 of run_20260824_055411 took the object from the wrong clause."""
+    objects = ["cardboard box", "push chopper"]
+    action = ("opening and closing the cardboard box, then removing the "
+              "push chopper from the box")
+    # "removing" is the matched verb, so the chopper is the object even though
+    # the box is mentioned first — ranking by absolute position picked the box.
+    act, verb_index = _match_action(action, objects)
+    assert act == ActionType.REMOVE
+    assert _order_objects_by_action(action, objects, verb_index)[0] == "push chopper"
+
+    # Blanking the object names must not shift the verb offset.
+    assert action[verb_index:].startswith("removing")
+
+
+def test_verb_offset_survives_multiple_clauses():
+    """A second clause after the verb must not steal the object role."""
+    objects = ["cardboard box", "push chopper"]
+    action = ("the person removes the push chopper from the cardboard box "
+              "and then places the box back down")
+    act, verb_index = _match_action(action, objects)
+    assert act == ActionType.REMOVE
+    assert _order_objects_by_action(action, objects, verb_index)[0] == "push chopper"
 
 
 def test_verb_is_not_read_out_of_an_object_name():

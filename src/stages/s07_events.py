@@ -62,20 +62,47 @@ _ACTION_STEMS: tuple[tuple[tuple[str, ...], ActionType], ...] = (
 
 
 def _strip_object_phrases(action_lower: str, objects: list[str] | None) -> str:
-    """Remove the object names from the action text before matching verbs.
+    """Blank out the object names in the action text before matching verbs.
 
     "push chopper" is an object whose name contains a verb, so matching verbs
     against the whole string read "unboxing a push chopper" as a PUSH. Longest
-    phrases first so "cardboard box" is removed before a bare "box" would be.
+    phrases first so "cardboard box" goes before a bare "box". Each phrase is
+    replaced by spaces of equal length, which keeps every offset in the result
+    lined up with the original text.
     """
     if not objects:
         return action_lower
     phrases = {o.strip().lower() for o in objects if o and o.strip()}
     for phrase in sorted(phrases, key=len, reverse=True):
         action_lower = re.sub(
-            r"\b" + re.escape(phrase) + r"\b", " ", action_lower
+            r"\b" + re.escape(phrase) + r"\b",
+            lambda m: " " * len(m.group(0)),
+            action_lower,
         )
     return action_lower
+
+
+def _match_action(
+    action_lower: str, objects: list[str] | None
+) -> tuple[ActionType, int | None]:
+    """Return the action type and the offset of the verb that produced it.
+
+    The offset matters because the VLM returns compound actions — "opening and
+    closing the cardboard box, then removing the push chopper" — where the
+    object belongs to the clause of the matched verb, not to the sentence.
+    Offsets are valid against the original text: :func:`_strip_object_phrases`
+    preserves length.
+    """
+    text = _strip_object_phrases(action_lower, objects)
+    for stems, action in _ACTION_STEMS:
+        starts = [
+            m.start() for m in
+            (re.search(r"\b" + re.escape(s), text) for s in stems)
+            if m is not None
+        ]
+        if starts:
+            return action, min(starts)
+    return ActionType.UNKNOWN, None
 
 
 def _map_raw_action_to_type(
@@ -86,18 +113,12 @@ def _map_raw_action_to_type(
     Rules:
     - Return UNKNOWN when evidence is insufficient or ambiguous
     - Do not force a match; prefer UNKNOWN over incorrect mapping
-    - Never read a verb out of an object's name; *objects* is stripped first
+    - Never read a verb out of an object's name; *objects* is blanked first
     """
     if not raw_action:
         return ActionType.UNKNOWN
+    return _match_action(raw_action.lower(), objects)[0]
 
-    text = _strip_object_phrases(raw_action.lower(), objects)
-
-    for stems, action in _ACTION_STEMS:
-        if any(re.search(r"\b" + re.escape(s), text) for s in stems):
-            return action
-
-    return ActionType.UNKNOWN
 
 
 
@@ -200,32 +221,46 @@ def _is_locative_mention(action_lower: str, idx: int) -> bool:
 
 
 def _order_objects_by_action(
-    raw_action: str | None, vlm_objects: list[str]
+    raw_action: str | None,
+    vlm_objects: list[str],
+    verb_index: int | None = None,
 ) -> list[str]:
     """Reorder *vlm_objects* so the thing the verb acts on comes first.
 
     The VLM's ``objects`` order is not reliable. For "placing the push chopper
     back into the box" it returned ``["box", "push chopper"]``, so trusting
-    position named the container as the manipulated object. English puts the
-    direct object before any prepositional phrase, so the object mentioned
-    earliest in the action text is the manipulated one — and anything led by a
-    locative preposition is a destination, not the object, however early it
-    appears. Objects the action never mentions keep their original order at the
-    back; if it mentions none, the original order stands.
+    position named the container as the manipulated object. Three signals decide
+    instead, in order:
+
+    1. Anything led by a locative preposition is a destination, not the object,
+       however early it appears ("from the cardboard box").
+    2. Objects named after *verb_index* beat objects named before it. The VLM
+       returns compound actions, and in "opening and closing the cardboard box,
+       then removing the push chopper" the chopper belongs to the matched verb
+       while the box belongs to a clause that was not selected.
+    3. Nearest to the verb wins, since English puts the direct object first.
+
+    Objects the action never mentions keep their original order at the back; if
+    it mentions none, the original order stands.
     """
     action_lower = (raw_action or "").lower()
     if not action_lower:
         return list(vlm_objects)
 
-    mentioned: list[tuple[tuple[bool, int, int], str]] = []
+    mentioned: list[tuple[tuple[bool, int, int, int], str]] = []
     unmentioned: list[str] = []
     for pos, label in enumerate(vlm_objects):
         idx = _mention_index(label, action_lower)
         if idx is None:
             unmentioned.append(label)
+            continue
+        if verb_index is None:
+            before_verb, distance = False, idx
         else:
-            key = (_is_locative_mention(action_lower, idx), idx, pos)
-            mentioned.append((key, label))
+            before_verb = idx < verb_index
+            distance = abs(idx - verb_index)
+        key = (_is_locative_mention(action_lower, idx), before_verb, distance, pos)
+        mentioned.append((key, label))
 
     if not mentioned:
         return list(vlm_objects)
@@ -239,19 +274,20 @@ def _resolve_object_track(
     person_classes: set[str],
     background_classes: set[str],
     raw_action: str | None = None,
+    verb_index: int | None = None,
 ) -> tuple[int | None, str | None]:
     """Resolve the manipulated object to a track id, or (None, label).
 
-    Candidate objects are ordered by what the action text says the hand is
-    acting on rather than by the VLM's list order — see
-    :func:`_order_objects_by_action`. Scene classes are excluded: a "dining
-    table" is never what the hand is acting on. Returns the label even when no
-    track matches, so downstream stages can still say *what* went unresolved.
+    Candidate objects are ordered by what the matched verb acts on rather than
+    by the VLM's list order — see :func:`_order_objects_by_action`. Scene
+    classes are excluded: a "dining table" is never what the hand is acting on.
+    Returns the label even when no track matches, so downstream stages can still
+    say *what* went unresolved.
     """
     if not vlm_objects:
         return None, None
 
-    ordered = _order_objects_by_action(raw_action, vlm_objects)
+    ordered = _order_objects_by_action(raw_action, vlm_objects, verb_index)
 
     excluded = person_classes | background_classes
     candidates = [
@@ -301,14 +337,17 @@ def _extract_events_from_vlm_observations(ctx: PipelineContext) -> list[Physical
             if tid in track_by_id
         ]
         actor_track_id = _resolve_actor_track(segment_tracks, person_classes)
+
+        # Map raw_action to ActionType. The object names are blanked out first —
+        # "push chopper" carries a verb in its name — and the verb's offset then
+        # decides which clause of a compound action owns the object.
+        action_type, verb_index = _match_action(
+            (obs.raw_action or "").lower(), obs.objects
+        )
         object_track_id, object_label = _resolve_object_track(
             obs.objects, segment_tracks, person_classes, background_classes,
-            raw_action=obs.raw_action,
+            raw_action=obs.raw_action, verb_index=verb_index,
         )
-
-        # Map raw_action to ActionType. The object names are stripped out first:
-        # "push chopper" carries a verb in its name.
-        action_type = _map_raw_action_to_type(obs.raw_action or "", obs.objects)
 
         timing_precision = _timing_precision(obs)
 

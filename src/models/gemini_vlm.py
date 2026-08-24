@@ -44,6 +44,9 @@ _MAX_FRAMES = 16
 # MIME type for uploaded temporary video clips.
 _VIDEO_MIME = "video/mp4"
 
+# Fixed so repeated runs of the same clip vary as little as the API allows.
+_GENERATION_SEED = 20260824
+
 
 class GeminiVLM(VisionLanguageModel):
     """Remote VLM backend using Google Gemini multimodal API.
@@ -232,6 +235,17 @@ class GeminiVLM(VisionLanguageModel):
 
     def _run_inference(self, uploaded_file, prompt: str) -> str:
         """Run multimodal inference and return the raw response text."""
+        # Greedy decoding plus a fixed seed is the most reproducibility the API
+        # offers, and it is not enough: two runs of tt6 eighteen minutes apart
+        # returned materially different action text. Treat VLM output as drifting
+        # input, not as a constant.
+        gen_kwargs = {
+            "response_mime_type": "application/json",
+            "temperature": 0.0,  # Physical analysis, not creativity.
+        }
+        if "seed" in self._types.GenerateContentConfig.model_fields:
+            gen_kwargs["seed"] = _GENERATION_SEED
+
         try:
             response = self._client.models.generate_content(
                 model=self._model_name,
@@ -242,10 +256,7 @@ class GeminiVLM(VisionLanguageModel):
                     ),
                     prompt,
                 ],
-                config=self._types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    temperature=0.0,  # Deterministic — physical analysis, not creativity.
-                ),
+                config=self._types.GenerateContentConfig(**gen_kwargs),
             )
         except Exception as exc:
             # Re-raise so Stage 06 retry machinery records a genuine FAILED obs.
