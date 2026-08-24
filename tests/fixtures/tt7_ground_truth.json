@@ -2,15 +2,20 @@
   "_provenance": [
     "Hand-labelled by the repository owner on 2026-08-24 after watching tt6.mp4.",
     "The seven actions are the owner's own words and choices, unedited, copied",
-    "verbatim from tt6_ground_truth.json -- the SAME labels, since tt6.mp4 is",
-    "tt7.mp4 IS that source clip, uploaded on its own on 2026-08-24.",
-    "tt7.mp4 repeated four times.",
+    "verbatim from tt6_ground_truth.json -- the SAME labels, because tt7.mp4 IS",
+    "that source clip: tools/align_clips.py matched tt7.mp4 against tt6.mp4 frame",
+    "by frame and found tt7.mp4 bit-identical to tt6.mp4 frames 0-199 (mean grey",
+    "difference 0.000), so the labels transfer with no shift.",
+    "",
+    "tt7.mp4 uploaded on its own on 2026-08-24. It is 200 frames at 30fps =",
+    "6.667s. tt6.mp4 is this clip five times end to end, not four; see that",
+    "file's provenance for how the count was corrected from pixels.",
     "",
     "This file exists so the source clip can be run on its own. repeats=1, so",
     "ground truth is 7 actions and the times are already absolute: no folding,",
     "no copy boundaries, and every track break is real fragmentation rather",
     "than a hard cut. That makes it the cleaner test bed -- but it also samples",
-    "the VLM once instead of four times, so a lucky run reads 100%. Keep scoring",
+    "the VLM once instead of five times, so a lucky run reads 100%. Keep scoring",
     "tt6.mp4 as well; that is where VLM variance is visible.",
     "",
     "Do not edit these labels to make a score look better. If they disagree with",
@@ -27,7 +32,7 @@
     "template, and 'OFF' is kept as written."
   ],
   "video_file": "tt7.mp4",
-  "total_duration_sec": 8.3,
+  "total_duration_sec": 6.6667,
   "repeats": 1,
   "people_visible": 1,
   "objects_visible": [
@@ -118,8 +123,8 @@
       "direction": "OFF",
       "hand": "BOTH",
       "start_sec": 5.0,
-      "end_sec": 7.0,
-      "note": ""
+      "end_sec": 6.63,
+      "note": "end clamped from 7.0 to the 6.633s clip end. The source clip is 6.667s and its copy stride 6.633s, so an end of 7.0 ran past the cut into the next copy; the move itself is truncated by the edit, not re-timed."
     }
   ]
 }

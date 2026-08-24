@@ -6,10 +6,29 @@
     "a score look better -- if it disagrees with the pipeline, the pipeline is",
     "what is wrong.",
     "",
-    "tt6.mp4 is ONE ~8.3s recording copied four times end to end. The labels",
-    "describe the source clip once; tools/score_run.py expands them x4 by adding",
-    "i * source_clip_duration_sec. So ground truth for the whole video is 28",
-    "actions, and the copy boundaries fall at about frames 249 / 498 / 747."
+    "tt6.mp4 is ONE 6.667s recording copied FIVE times end to end. The labels",
+    "describe the source clip once; tools/score_run.py expands them x5 by adding",
+    "i * source_clip_duration_sec. So ground truth for the whole video is 35",
+    "actions.",
+    "",
+    "This file first said four copies of 8.3s, obtained by dividing 33.2s by an",
+    "assumed count. That was wrong, and wrong invisibly: score_run.py offsets",
+    "each copy's labels by the period and audit_detections.py folds frames modulo",
+    "it, so both tools kept reporting numbers while placing copies 2-4 up to 4.9s",
+    "away from the footage they were scoring, and never scoring copy 5 at all.",
+    "",
+    "The corrected values come from pixels, not arithmetic. tools/align_clips.py",
+    "slides tt7.mp4 (200 frames, the source clip on its own) along tt6.mp4 and",
+    "reports mean grey difference per offset. Result: matches at frames 0, 199,",
+    "398, 598, 796 -- scoring 0.000, 0.261, 0.261, 1.319, 4.125 -- against 28.6",
+    "at non-copy offset 498 and a 28.8 worst case. Offset 0 is bit-identical, so",
+    "tt7.mp4 IS tt6.mp4 frames 0-199 and these label times need no shift.",
+    "",
+    "Copy stride is therefore 199 frames (6.6333s), not tt7's own 200 frames:",
+    "5 x 200 = 1000 against tt6's 996, i.e. one frame is dropped at each of the",
+    "four seams. source_clip_duration_sec is the STRIDE, because that is what",
+    "score_run.py multiplies. Its worst per-copy error is one frame (copy 4,",
+    "predicted 19.900s vs actual 19.933s), far inside timing_tolerance_sec."
   ],
   "_known_limitations": [
     "action 'FOLD' is NOT in src/schema/event.py ActionType. The vocabulary has",
@@ -24,8 +43,8 @@
 
   "video_file": "tt6.mp4",
   "total_duration_sec": 33.2,
-  "repeats": 4,
-  "source_clip_duration_sec": 8.3,
+  "repeats": 5,
+  "source_clip_duration_sec": 6.6333,
 
   "people_visible": 1,
   "objects_visible": ["push chopper", "cardboard box", "dining table"],
@@ -114,8 +133,8 @@
       "direction": "OFF",
       "hand": "BOTH",
       "start_sec": 5.0,
-      "end_sec": 7.0,
-      "note": ""
+      "end_sec": 6.63,
+      "note": "end clamped from 7.0 to the 6.633s clip end. The source clip is 6.667s and its copy stride 6.633s, so an end of 7.0 ran past the cut into the next copy; the move itself is truncated by the edit, not re-timed."
     }
   ]
 }
