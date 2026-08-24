@@ -30,9 +30,13 @@ tracker:
   backend: "bytetrack"
 
 vlm:
-  enabled: true      # enabled for Gemini testing
-  backend: "GEMINI"  # LOCAL_MODEL | REMOTE_MODEL | GEMINI
-  model_name: "gemini-3.1-flash-lite"  # Gemini model
+  # Local-first default: the committed config commits to no cloud provider and
+  # makes no network call. Gemini is opted into per run, e.g. by
+  # config/kaggle_tt6_dino_hf.yaml, which sets backend: GEMINI. Two tests in
+  # tests/test_config.py enforce this.
+  enabled: false
+  backend: "LOCAL_MODEL"  # LOCAL_MODEL | REMOTE_MODEL | GEMINI
+  model_name: "stub"
   timeout_sec: 60.0
   max_retries: 2
 

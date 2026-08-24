@@ -59,6 +59,21 @@ class TrackerConfig(BaseModel):
     # and re-created under a new id. This budgets lifetime in *detection
     # opportunities* instead, and s04 derives the stride from the sampling plan.
     max_missed_detections: int = 2
+    # Post-tracking entity resolution (src/models/track_stitcher.py). The
+    # tracker has no re-identification path at all: a deleted track can never
+    # come back, so one object crossing a detection gap returns under a new id.
+    # tt6 produced 21 chopper ids for one chopper. Set stitch_enabled=False to
+    # get the raw fragmented tracks back.
+    stitch_enabled: bool = True
+    # Frames of dropout a single object is allowed to cross. 45 @ 30fps = 1.5s,
+    # comfortably longer than the tracker's own delete budget.
+    stitch_max_gap_frames: int = 45
+    # Overlap beyond this means both were tracked at once — two objects, not one.
+    stitch_max_overlap_frames: int = 2
+    # Seam test: either bound passing is enough. IoU catches large slow objects,
+    # centre distance catches small fast ones that move their own width.
+    stitch_iou_threshold: float = 0.10
+    stitch_max_center_dist_norm: float = 0.15
 
 
 class VLMConfig(BaseModel):

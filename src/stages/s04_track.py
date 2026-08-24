@@ -15,6 +15,7 @@ from src.context import PipelineContext
 from src.interfaces.tracker import ObjectTracker
 from src.logging_utils import get_logger
 from src.models.stub_tracker import StubTracker
+from src.models.track_stitcher import stitch_tracks
 from src.schema.detection import Detection
 from src.schema.episode import PipelineStageStatus
 from src.schema.track import Track
@@ -77,6 +78,72 @@ def _write_output(ctx: PipelineContext, status: str = "OK") -> None:
     data = [t.model_dump(mode="json") for t in ctx.tracks]
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
+
+
+def _class_counts(tracks: list[Track]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for t in tracks:
+        counts[t.class_name] = counts.get(t.class_name, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _stitch(ctx: PipelineContext) -> None:
+    """Merge fragmented tracks into one track per physical object.
+
+    Writes ``track_merges.json`` alongside ``tracks.json``: every surviving id
+    with the original ids folded into it, plus its frame span. A merge must be
+    auditable, and the spans are what tell us *where* the entity breaks landed —
+    on a real cut, or in the middle of a continuous motion.
+    """
+    cfg = ctx.config.tracker
+    if not getattr(cfg, "stitch_enabled", False) or not ctx.tracks:
+        return
+
+    before = _class_counts(ctx.tracks)
+    n_before = len(ctx.tracks)
+
+    entities, absorbed = stitch_tracks(
+        ctx.tracks,
+        frame_width=ctx.video_metadata.width if ctx.video_metadata else 0,
+        frame_height=ctx.video_metadata.height if ctx.video_metadata else 0,
+        max_gap_frames=cfg.stitch_max_gap_frames,
+        max_overlap_frames=cfg.stitch_max_overlap_frames,
+        iou_threshold=cfg.stitch_iou_threshold,
+        max_center_dist_norm=cfg.stitch_max_center_dist_norm,
+    )
+    ctx.tracks = entities
+    after = _class_counts(ctx.tracks)
+
+    report = {
+        "enabled": True,
+        "max_gap_frames": cfg.stitch_max_gap_frames,
+        "max_overlap_frames": cfg.stitch_max_overlap_frames,
+        "iou_threshold": cfg.stitch_iou_threshold,
+        "max_center_dist_norm": cfg.stitch_max_center_dist_norm,
+        "tracks_before": n_before,
+        "tracks_after": len(entities),
+        "by_class_before": before,
+        "by_class_after": after,
+        "entities": [
+            {
+                "entity_id": t.track_id,
+                "class_name": t.class_name,
+                "start_frame": t.start_frame,
+                "end_frame": t.end_frame,
+                "n_points": len(t.points),
+                "absorbed_track_ids": absorbed.get(t.track_id, [t.track_id]),
+            }
+            for t in entities
+        ],
+    }
+    ctx.output_dir.mkdir(parents=True, exist_ok=True)
+    with open(ctx.output_dir / "track_merges.json", "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2)
+
+    logger.info(
+        "[%s] Stitched %d fragments into %d entities | by class before=%s after=%s",
+        STAGE, n_before, len(entities), before, after,
+    )
 
 
 def run(ctx: PipelineContext) -> PipelineStageStatus:
@@ -167,6 +234,7 @@ def run(ctx: PipelineContext) -> PipelineStageStatus:
 
     # Finalize tracks
     ctx.tracks = list(all_tracks_by_id.values())
+    _stitch(ctx)
     _write_output(ctx)
 
     tracker.reset()
