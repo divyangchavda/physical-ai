@@ -228,6 +228,15 @@ def main() -> int:
         print(f"  fragments {m['tracks_before']} -> entities {m['tracks_after']}")
         print(f"  by class before : {m['by_class_before']}")
         print(f"  by class after  : {m['by_class_after']}")
+        # Print where each threshold came from. A stitcher that under-merges
+        # because a threshold was guessed looks identical to one that under-merges
+        # because the video is hard, unless the number in use is on screen.
+        if "max_overlap_frames_source" in m:
+            print(f"  overlap budget  : {m['max_overlap_frames']} frames "
+                  f"({m['max_overlap_frames_source']})")
+        if "duplicate_min_iou_source" in m:
+            print(f"  duplicate IoU   : {m['duplicate_min_iou']} "
+                  f"({m['duplicate_min_iou_source']})")
         reps = int(truth.get("repeats", 1))
         if reps > 1:
             # tt6's copies are hard cuts; an entity SHOULD break there and

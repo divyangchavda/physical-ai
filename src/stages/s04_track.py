@@ -87,17 +87,53 @@ def _class_counts(tracks: list[Track]) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
-def _stitch(ctx: PipelineContext) -> None:
+def _write_raw_tracks(ctx: PipelineContext) -> None:
+    """Snapshot the tracker's own output before stitching rewrites it.
+
+    Without this, ``tracks.json`` holds the merged entities and the fragments
+    are unrecoverable, so every threshold change costs a full GPU run to
+    re-detect. With it, the stitcher can be re-tuned offline against a saved
+    file. It is also the only honest record of what the tracker actually
+    produced.
+    """
+    ctx.output_dir.mkdir(parents=True, exist_ok=True)
+    with open(ctx.output_dir / "tracks_raw.json", "w", encoding="utf-8") as f:
+        json.dump([t.model_dump(mode="json") for t in ctx.tracks], f, indent=2)
+
+
+def _stitch(ctx: PipelineContext, detection_stride: int) -> None:
     """Merge fragmented tracks into one track per physical object.
 
     Writes ``track_merges.json`` alongside ``tracks.json``: every surviving id
     with the original ids folded into it, plus its frame span. A merge must be
     auditable, and the spans are what tell us *where* the entity breaks landed —
     on a real cut, or in the middle of a continuous motion.
+
+    The overlap and duplicate thresholds are *derived* from the tracker's own
+    settings rather than picked. A guessed overlap budget of 2 frames was the
+    reason the first version of this stage merged 7 fragments out of 40: the
+    tracker's deletion lag makes sibling fragments overlap by up to
+    ``max(max_age, stride * (max_missed_detections + 1))`` frames by
+    construction, so 2 could not fire. Both effective values are written into
+    the report so the number in use is never implicit.
     """
     cfg = ctx.config.tracker
     if not getattr(cfg, "stitch_enabled", False) or not ctx.tracks:
         return
+
+    # Same expression as kalman_sparse_tracker.py:386, which is what actually
+    # bounds how long a dying track keeps emitting points beside its successor.
+    tail_frames = max(cfg.max_age, detection_stride * (cfg.max_missed_detections + 1))
+    overlap_budget = (
+        cfg.stitch_max_overlap_frames
+        if cfg.stitch_max_overlap_frames is not None
+        else tail_frames
+    )
+    duplicate_min_iou = (
+        cfg.stitch_duplicate_min_iou
+        if cfg.stitch_duplicate_min_iou is not None
+        else cfg.iou_threshold
+    )
 
     before = _class_counts(ctx.tracks)
     n_before = len(ctx.tracks)
@@ -107,9 +143,10 @@ def _stitch(ctx: PipelineContext) -> None:
         frame_width=ctx.video_metadata.width if ctx.video_metadata else 0,
         frame_height=ctx.video_metadata.height if ctx.video_metadata else 0,
         max_gap_frames=cfg.stitch_max_gap_frames,
-        max_overlap_frames=cfg.stitch_max_overlap_frames,
+        max_overlap_frames=overlap_budget,
         iou_threshold=cfg.stitch_iou_threshold,
         max_center_dist_norm=cfg.stitch_max_center_dist_norm,
+        duplicate_min_iou=duplicate_min_iou,
     )
     ctx.tracks = entities
     after = _class_counts(ctx.tracks)
@@ -117,9 +154,20 @@ def _stitch(ctx: PipelineContext) -> None:
     report = {
         "enabled": True,
         "max_gap_frames": cfg.stitch_max_gap_frames,
-        "max_overlap_frames": cfg.stitch_max_overlap_frames,
+        "max_overlap_frames": overlap_budget,
+        "max_overlap_frames_source": (
+            "config" if cfg.stitch_max_overlap_frames is not None
+            else f"derived: max(max_age={cfg.max_age}, "
+                 f"stride={detection_stride} * (max_missed_detections="
+                 f"{cfg.max_missed_detections} + 1)) = {tail_frames}"
+        ),
         "iou_threshold": cfg.stitch_iou_threshold,
         "max_center_dist_norm": cfg.stitch_max_center_dist_norm,
+        "duplicate_min_iou": duplicate_min_iou,
+        "duplicate_min_iou_source": (
+            "config" if cfg.stitch_duplicate_min_iou is not None
+            else f"derived: tracker.iou_threshold = {cfg.iou_threshold}"
+        ),
         "tracks_before": n_before,
         "tracks_after": len(entities),
         "by_class_before": before,
@@ -141,8 +189,10 @@ def _stitch(ctx: PipelineContext) -> None:
         json.dump(report, f, indent=2)
 
     logger.info(
-        "[%s] Stitched %d fragments into %d entities | by class before=%s after=%s",
-        STAGE, n_before, len(entities), before, after,
+        "[%s] Stitched %d fragments into %d entities "
+        "(overlap budget %d frames, duplicate IoU %.2f) | by class before=%s after=%s",
+        STAGE, n_before, len(entities), overlap_budget, duplicate_min_iou,
+        before, after,
     )
 
 
@@ -234,7 +284,8 @@ def run(ctx: PipelineContext) -> PipelineStageStatus:
 
     # Finalize tracks
     ctx.tracks = list(all_tracks_by_id.values())
-    _stitch(ctx)
+    _write_raw_tracks(ctx)
+    _stitch(ctx, detection_stride=stride)
     _write_output(ctx)
 
     tracker.reset()

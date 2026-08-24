@@ -68,12 +68,21 @@ class TrackerConfig(BaseModel):
     # Frames of dropout a single object is allowed to cross. 45 @ 30fps = 1.5s,
     # comfortably longer than the tracker's own delete budget.
     stitch_max_gap_frames: int = 45
-    # Overlap beyond this means both were tracked at once — two objects, not one.
-    stitch_max_overlap_frames: int = 2
+    # Frames of overlap that are a deletion-lag artifact rather than evidence of
+    # two objects. None => s04 derives it with the tracker's own formula,
+    # max(max_age, stride * (max_missed_detections + 1)) — the exact expression
+    # at kalman_sparse_tracker.py:386 that bounds how long a dying track keeps
+    # emitting predicted points alongside its successor. Set an int to override.
+    stitch_max_overlap_frames: int | None = None
     # Seam test: either bound passing is enough. IoU catches large slow objects,
     # centre distance catches small fast ones that move their own width.
     stitch_iou_threshold: float = 0.10
     stitch_max_center_dist_norm: float = 0.15
+    # Two tracks overlapping *past* the tail bound are the same object only if
+    # they hold the same pixels on every shared frame. None => s04 reuses
+    # tracker.iou_threshold, i.e. the tracker's own definition of "these boxes
+    # are the same object", rather than inventing a second number for it.
+    stitch_duplicate_min_iou: float | None = None
 
 
 class VLMConfig(BaseModel):
