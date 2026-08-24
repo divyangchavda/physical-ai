@@ -43,8 +43,16 @@ tracker:
   backend: "kalman_sparse"
   iou_threshold: 0.20
   max_age: 15
-  min_hits: 1
-  max_missed_detections: 2  # ~30 frames at stride 10; s04 derives the stride
+  # Was 1, which let a single detector flicker mint a permanent track id. At
+  # stride 3 there are 3.3x more detection frames than at stride 10, so that
+  # took tracks from 57 to 87 even though per-detection association improved.
+  # 3 consecutive detection frames = 0.3s of evidence before an id is issued.
+  min_hits: 3
+  # Was 2. s04 passes the stride down and the tracker deletes after
+  # max(max_age, stride * (missed + 1)) unmatched frames, so dropping the
+  # stride to 3 silently cut gap tolerance from 30 frames to 15. 5 restores it
+  # to 18 frames (0.6s), now that detections are dense enough for IoU to chain.
+  max_missed_detections: 5
 
 segment:
   person_classes: ["person"]
