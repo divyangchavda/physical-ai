@@ -1,0 +1,103 @@
+{
+  "_readme": [
+    "FILL THIS BY HAND. Only write what you can SEE in the video. Never guess.",
+    "",
+    "You label the SOURCE CLIP ONLY -- the one ~8 second recording.",
+    "tt6.mp4 is that clip copied 4 times, so the scorer expands your labels x4",
+    "by itself. Do NOT write the same action four times.",
+    "",
+    "Timing is relative to the START OF THE CLIP, so it runs 0.0 -> about 8.3.",
+    "Rough numbers are fine. 'timing_tolerance_sec' below is the slack the",
+    "scorer allows, so being half a second off costs nothing.",
+    "",
+    "One entry in 'actions' per thing you do with your hands. If you do 2 things,",
+    "there are 2 entries. If 3, then 3. Delete the entries you do not need.",
+    "",
+    "'i_see' is the most important field. Write it in your own plain words,",
+    "describing only what is visible. That is the record everything else is",
+    "checked against.",
+    "",
+    "Allowed values for 'action' (pick exactly one, copy the spelling):",
+    "  GRASP RELEASE PICK PLACE MOVE PUSH PULL OPEN CLOSE INSERT REMOVE",
+    "  USE_TOOL TOUCH INSPECT UNKNOWN",
+    "  -> If you are not sure, write UNKNOWN. That is a real answer, not a failure.",
+    "",
+    "Allowed values for 'direction' (this is the field the pipeline keeps getting",
+    "backwards, so please be careful here):",
+    "  INTO     = object ends up inside something",
+    "  OUT_OF   = object ends up outside something it was inside",
+    "  ONTO     = object ends up resting on top of a surface",
+    "  OFF      = object is lifted off a surface",
+    "  NONE     = no in/out or on/off meaning (e.g. just closing a lid)",
+    "",
+    "Allowed values for 'hand': LEFT RIGHT BOTH CANNOT_TELL",
+    "",
+    "JSON RULE that bites people: no comma after the LAST item in a list or",
+    "object. Everything else is just quotes and colons.",
+    "",
+    "Delete the whole '_example_action' block before you send this back."
+  ],
+
+  "video_file": "tt6.mp4",
+  "total_duration_sec": 33.2,
+  "repeats": 4,
+  "source_clip_duration_sec": 8.3,
+
+  "people_visible": 1,
+  "objects_visible": ["push chopper", "cardboard box", "dining table"],
+
+  "timing_tolerance_sec": 1.0,
+
+  "_example_action": {
+    "_note": "THIS IS A FAKE EXAMPLE ABOUT A CUP, NOT YOUR VIDEO. Delete this block.",
+    "order": 1,
+    "i_see": "my right hand lifts the white cup off the table and puts it on the shelf",
+    "action": "PLACE",
+    "object": "white cup",
+    "target": "shelf",
+    "direction": "ONTO",
+    "hand": "RIGHT",
+    "start_sec": 1.0,
+    "end_sec": 2.5,
+    "note": ""
+  },
+
+  "actions": [
+    {
+      "order": 1,
+      "i_see": "",
+      "action": "",
+      "object": "",
+      "target": "",
+      "direction": "",
+      "hand": "",
+      "start_sec": null,
+      "end_sec": null,
+      "note": ""
+    },
+    {
+      "order": 2,
+      "i_see": "",
+      "action": "",
+      "object": "",
+      "target": "",
+      "direction": "",
+      "hand": "",
+      "start_sec": null,
+      "end_sec": null,
+      "note": ""
+    },
+    {
+      "order": 3,
+      "i_see": "",
+      "action": "",
+      "object": "",
+      "target": "",
+      "direction": "",
+      "hand": "",
+      "start_sec": null,
+      "end_sec": null,
+      "note": ""
+    }
+  ]
+}
