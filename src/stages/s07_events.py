@@ -14,6 +14,7 @@ Output context: ctx.events (list[PhysicalEvent])
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 
@@ -35,55 +36,69 @@ def _write_output(ctx: PipelineContext) -> None:
         json.dump(data, f, indent=2)
 
 
-def _map_raw_action_to_type(raw_action: str) -> ActionType:
+# Verb stems in precedence order, matched at a leading word boundary so a stem
+# cannot fire from inside an unrelated word.
+_ACTION_STEMS: tuple[tuple[tuple[str, ...], ActionType], ...] = (
+    # Folding/assembling is several primitives at once, not one action type.
+    (("fold", "assembl"), ActionType.UNKNOWN),
+    (("releas", "let go"), ActionType.RELEASE),
+    (("insert",), ActionType.INSERT),
+    (("remov",), ActionType.REMOVE),
+    (("pick",), ActionType.PICK),
+    (("plac", "put down"), ActionType.PLACE),
+    (("grasp", "grip", "hold"), ActionType.GRASP),
+    (("push",), ActionType.PUSH),
+    (("pull",), ActionType.PULL),
+    (("open",), ActionType.OPEN),
+    (("clos",), ActionType.CLOSE),
+    # Placed after open/close deliberately: "opening and unpacking a box" is an
+    # OPEN, while "unboxing a push chopper" has no other verb and is a REMOVE.
+    (("unbox", "unpack"), ActionType.REMOVE),
+    (("using", "use"), ActionType.USE_TOOL),
+    (("touch",), ActionType.TOUCH),
+    (("inspect", "examin"), ActionType.INSPECT),
+    (("mov",), ActionType.MOVE),
+)
+
+
+def _strip_object_phrases(action_lower: str, objects: list[str] | None) -> str:
+    """Remove the object names from the action text before matching verbs.
+
+    "push chopper" is an object whose name contains a verb, so matching verbs
+    against the whole string read "unboxing a push chopper" as a PUSH. Longest
+    phrases first so "cardboard box" is removed before a bare "box" would be.
+    """
+    if not objects:
+        return action_lower
+    phrases = {o.strip().lower() for o in objects if o and o.strip()}
+    for phrase in sorted(phrases, key=len, reverse=True):
+        action_lower = re.sub(
+            r"\b" + re.escape(phrase) + r"\b", " ", action_lower
+        )
+    return action_lower
+
+
+def _map_raw_action_to_type(
+    raw_action: str, objects: list[str] | None = None
+) -> ActionType:
     """Map VLM raw_action string to canonical ActionType enum.
-    
+
     Rules:
     - Return UNKNOWN when evidence is insufficient or ambiguous
     - Do not force a match; prefer UNKNOWN over incorrect mapping
+    - Never read a verb out of an object's name; *objects* is stripped first
     """
     if not raw_action:
         return ActionType.UNKNOWN
-    
-    raw_lower = raw_action.lower()
-    
-    # Direct keyword matching (order matters: more specific first)
-    if "fold" in raw_lower or "assemble" in raw_lower or "assembling" in raw_lower:
-        # Folding/assembling involves multiple primitive actions
-        # but typically includes closing/forming - map to generic manipulation
-        return ActionType.UNKNOWN  # Too complex for single action type
-    
-    # Check for whole-word or common patterns to avoid substring conflicts
-    if "releasing" in raw_lower or "release" in raw_lower or "let go" in raw_lower:
-        return ActionType.RELEASE
-    if "inserting" in raw_lower or "insert" in raw_lower:
-        return ActionType.INSERT
-    if "removing" in raw_lower or "remove" in raw_lower:
-        return ActionType.REMOVE
-    if "picking" in raw_lower or "pick" in raw_lower:
-        return ActionType.PICK
-    if "placing" in raw_lower or "place" in raw_lower or "put down" in raw_lower:
-        return ActionType.PLACE
-    if "grasping" in raw_lower or "grasp" in raw_lower or "grip" in raw_lower or "hold" in raw_lower:
-        return ActionType.GRASP
-    if "pushing" in raw_lower or "push" in raw_lower:
-        return ActionType.PUSH
-    if "pulling" in raw_lower or "pull" in raw_lower:
-        return ActionType.PULL
-    if "opening" in raw_lower or "open" in raw_lower:
-        return ActionType.OPEN
-    if "closing" in raw_lower or "close" in raw_lower:
-        return ActionType.CLOSE
-    if "using" in raw_lower or "use" in raw_lower:
-        return ActionType.USE_TOOL
-    if "touching" in raw_lower or "touch" in raw_lower:
-        return ActionType.TOUCH
-    if "inspecting" in raw_lower or "inspect" in raw_lower or "examine" in raw_lower:
-        return ActionType.INSPECT
-    if "moving" in raw_lower or "move" in raw_lower:
-        return ActionType.MOVE
+
+    text = _strip_object_phrases(raw_action.lower(), objects)
+
+    for stems, action in _ACTION_STEMS:
+        if any(re.search(r"\b" + re.escape(s), text) for s in stems):
+            return action
 
     return ActionType.UNKNOWN
+
 
 
 # Both ends must be strictly inside the segment by this margin for the VLM's
@@ -149,16 +164,17 @@ def _mention_index(label: str, action_lower: str) -> int | None:
 
     Falls back to the head noun ("cardboard box" -> "box") because the VLM
     names the same thing one way in ``objects`` and another in ``raw_action``.
+    Matched at word boundaries: a bare ``in`` test found "box" inside
+    "unboxing", which named the box as the object of "unboxing a push chopper".
     """
     phrase = label.strip().lower()
     if not phrase:
         return None
-    idx = action_lower.find(phrase)
-    if idx >= 0:
-        return idx
-    head = phrase.split()[-1]
-    idx = action_lower.find(head)
-    return idx if idx >= 0 else None
+    for needle in (phrase, phrase.split()[-1]):
+        match = re.search(r"\b" + re.escape(needle) + r"\b", action_lower)
+        if match:
+            return match.start()
+    return None
 
 
 # Prepositions that introduce a destination or container rather than the thing
@@ -290,8 +306,9 @@ def _extract_events_from_vlm_observations(ctx: PipelineContext) -> list[Physical
             raw_action=obs.raw_action,
         )
 
-        # Map raw_action to ActionType
-        action_type = _map_raw_action_to_type(obs.raw_action or "")
+        # Map raw_action to ActionType. The object names are stripped out first:
+        # "push chopper" carries a verb in its name.
+        action_type = _map_raw_action_to_type(obs.raw_action or "", obs.objects)
 
         timing_precision = _timing_precision(obs)
 

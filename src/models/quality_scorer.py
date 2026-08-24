@@ -71,25 +71,32 @@ class QualityScorer:
                 reasons.append("No interaction graph edge found")
                 
             # State Evidence (0.20)
-            state_ev = 0.0
+            event_transitions = transitions_by_event.get(event.event_id, [])
+            best_ev = 0.0
+            for t in event_transitions:
+                from_unk = (t.from_state == "UNKNOWN")
+                to_unk = (t.to_state == "UNKNOWN")
+                if not from_unk and not to_unk:
+                    score = 1.0
+                elif from_unk and to_unk:
+                    score = 0.0
+                else:
+                    score = 0.5
+                best_ev = max(best_ev, score)
+
             if event.action in EXPECTED_STATE_TRANSITION_ACTIONS:
-                best_ev = 0.0
-                event_transitions = transitions_by_event.get(event.event_id, [])
-                for t in event_transitions:
-                    from_unk = (t.from_state == "UNKNOWN")
-                    to_unk = (t.to_state == "UNKNOWN")
-                    if not from_unk and not to_unk:
-                        score = 1.0
-                    elif from_unk and to_unk:
-                        score = 0.0
-                    else:
-                        score = 0.5
-                    best_ev = max(best_ev, score)
                 state_ev = best_ev
                 if state_ev < 1.0:
                     reasons.append("Missing or partial state transition evidence for expected action")
+            elif event_transitions:
+                # An action that does not require a transition still may not earn
+                # credit for one reading UNKNOWN->UNKNOWN. That free 1.0 is how
+                # the weakest event in a run came out with the highest score.
+                state_ev = best_ev
+                if state_ev < 1.0:
+                    reasons.append("State transition attached to this action carries no state evidence")
             else:
-                state_ev = 1.0  # Optional actions don't penalize
+                state_ev = 1.0  # Nothing claimed, so nothing to penalize
                 
             # Timing Precision (0.10)
             if event.attributes.get("timing_precision") == "EXACT":

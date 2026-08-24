@@ -344,6 +344,36 @@ def test_extract_events_complex_action():
 
 
 
+def test_verb_is_not_read_out_of_an_object_name():
+    """Event 4 of run_20260824_053624: "unboxing a push chopper" scored PUSH."""
+    # The object's name carries a verb, so matching against the whole string
+    # made every action on a push chopper look like a PUSH.
+    objects = ["cardboard box", "push chopper"]
+    assert _map_raw_action_to_type("unboxing a push chopper", objects) == ActionType.REMOVE
+    assert _map_raw_action_to_type(
+        "placing the push chopper into the cardboard box", objects
+    ) == ActionType.PLACE
+    # A real push of that object still reads as PUSH.
+    assert _map_raw_action_to_type(
+        "pushing the push chopper across the table", objects
+    ) == ActionType.PUSH
+    # Compound verb keeps its stronger reading rather than becoming REMOVE.
+    assert _map_raw_action_to_type(
+        "opening and unpacking a cardboard box", objects
+    ) == ActionType.OPEN
+
+
+def test_head_noun_match_respects_word_boundaries():
+    """"box" must not match inside "unboxing" and hand the box the object role."""
+    assert _order_objects_by_action(
+        "unboxing a push chopper", ["cardboard box", "push chopper"]
+    )[0] == "push chopper"
+    # The same head-noun fallback still works when it is a real word.
+    assert _order_objects_by_action(
+        "unboxing the cardboard box", ["push chopper", "cardboard box"]
+    )[0] == "cardboard box"
+
+
 def test_order_objects_by_action():
     """The manipulated object beats the container, whatever the list order."""
     # Both cases are verbatim from run_20260824_051032, where trusting the

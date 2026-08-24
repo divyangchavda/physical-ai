@@ -144,13 +144,15 @@ class GraphBuilder:
         
         # Rule 1: Explicit ID
         if event.object_track_id is not None:
-            # Try to get the label from the track or observation
-            label = None
-            if obs and obs.objects:
-                label = obs.objects[0]
-            for t in tracks:
-                if t.track_id == event.object_track_id:
-                    label = label or t.class_name
+            # s07 already worked out which object the action acts on and
+            # recorded it as object_label. obs.objects[0] is only the VLM's list
+            # order, which labelled a push chopper track "box".
+            label = (event.attributes or {}).get("object_label")
+            if not label:
+                for t in tracks:
+                    if t.track_id == event.object_track_id:
+                        label = t.class_name
+                        break
             targets.append((event.object_track_id, label, "RESOLVED"))
             return targets
             
