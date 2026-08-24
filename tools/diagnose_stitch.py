@@ -34,14 +34,19 @@ import json
 import sys
 from pathlib import Path
 
-from src.models.track_stitcher import (
+# Running this as a script puts tools/ on sys.path, not the repo root, so
+# `import src` fails. Prepend the repo root so `python tools/diagnose_stitch.py`
+# works from anywhere without needing -m or PYTHONPATH.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from src.models.track_stitcher import (  # noqa: E402
     _center_dist_norm,
     _first_real,
     _iou,
     _last_real,
     _shared_real_iou,
 )
-from src.schema.track import Track
+from src.schema.track import Track  # noqa: E402
 
 
 def _load(path: Path):
