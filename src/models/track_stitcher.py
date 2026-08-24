@@ -60,19 +60,38 @@ def _center_dist_norm(a: BoundingBox, b: BoundingBox, diagonal: float) -> float:
     return math.hypot(a.cx - b.cx, a.cy - b.cy) / diagonal
 
 
-def _shared_frame_iou(a: Track, b: Track) -> tuple[int, float]:
-    """(number of frames both tracks cover, mean IoU on exactly those frames).
+def _last_real(t: Track) -> TrackPoint | None:
+    """The most recent point backed by an actual detection, not a prediction."""
+    for p in reversed(t.points):
+        if p.detection_confidence > 0.0:
+            return p
+    return None
 
-    Comparing boxes *at the same frame* is far stronger evidence than comparing
-    two endpoints recorded at different instants. Two tracks sitting on the same
-    pixels for every frame they coexist are one object seen twice; two objects
-    cannot occupy the same space.
+
+def _first_real(t: Track) -> TrackPoint | None:
+    for p in t.points:
+        if p.detection_confidence > 0.0:
+            return p
+    return None
+
+
+def _shared_real_iou(a: Track, b: Track) -> tuple[int, float]:
+    """(frames where BOTH tracks have a real detection, mean IoU on those frames).
+
+    Restricted to real detections on both sides on purpose. A track is dying
+    precisely because nothing matched it, so its points in the overlap region are
+    Kalman extrapolations; averaging IoU against those measures the quality of
+    the prediction, not whether two tracks are the same object. Two tracks that
+    hold the same pixels while *both* are being detected are one object seen
+    twice, and two objects cannot occupy the same space.
     """
-    b_boxes = {p.frame_index: p.bbox for p in b.points}
+    b_boxes = {
+        p.frame_index: p.bbox for p in b.points if p.detection_confidence > 0.0
+    }
     ious = [
         _iou(p.bbox, b_boxes[p.frame_index])
         for p in a.points
-        if p.frame_index in b_boxes
+        if p.detection_confidence > 0.0 and p.frame_index in b_boxes
     ]
     if not ious:
         return 0, 0.0
@@ -109,33 +128,44 @@ def _pick_entity(
 ) -> Track | None:
     """Return the entity this fragment continues, or None to start a new one."""
     best: Track | None = None
+    frag_obs = _first_real(frag) or frag.points[0]
+
     for ent in entities:
         if not ent.points:
             continue
-        gap = frag.start_frame - ent.end_frame
-        # Too far apart in time to be the same object crossing a dropout.
-        if gap > max_gap_frames:
+        ent_obs = _last_real(ent) or ent.points[-1]
+
+        # Two different questions, deliberately measured differently.
+        # "How long were we blind?" is a question about observations, so it uses
+        # the real detections either side of the hole. "Did these two coexist?"
+        # is a question about track spans, ghost tail included, because that is
+        # what makes the overlap an artifact rather than evidence.
+        blind_gap = frag_obs.frame_index - ent_obs.frame_index
+        span_gap = frag.start_frame - ent.end_frame
+        if blind_gap > max_gap_frames:
             continue
 
-        n_shared, mean_iou = _shared_frame_iou(ent, frag)
+        n_shared, mean_iou = _shared_real_iou(ent, frag)
+        a, b = ent_obs.bbox, frag_obs.bbox
+        seam_ok = (
+            _iou(a, b) >= iou_threshold
+            or _center_dist_norm(a, b, diagonal) <= max_center_dist_norm
+        )
 
-        if gap < -max_overlap_frames:
+        if span_gap < -max_overlap_frames:
             # Overlap beyond the tracker's propagation tail, so these two tracks
-            # genuinely coexisted rather than one being the other's ghost. They
-            # are still the same object if they sat on the same pixels for the
-            # whole time they coexisted — that is what a duplicate concurrent
-            # track looks like, and what a real second object cannot be.
-            if n_shared == 0 or mean_iou < duplicate_min_iou:
+            # genuinely coexisted rather than one being the other's ghost. When
+            # both were being detected in that window, holding the same pixels
+            # throughout identifies a duplicate. When the overlap is pure tail
+            # with no shared detections, there is nothing to average and the
+            # seam test between real observations is the only evidence there is.
+            if n_shared > 0:
+                if mean_iou < duplicate_min_iou:
+                    continue
+            elif not seam_ok:
                 continue
-        else:
-            a, b = ent.points[-1].bbox, frag.points[0].bbox
-            same_place_same_time = n_shared > 0 and mean_iou >= iou_threshold
-            if not (
-                same_place_same_time
-                or _iou(a, b) >= iou_threshold
-                or _center_dist_norm(a, b, diagonal) <= max_center_dist_norm
-            ):
-                continue
+        elif not ((n_shared > 0 and mean_iou >= iou_threshold) or seam_ok):
+            continue
 
         # Most recently active entity wins; lowest id breaks a tie.
         if best is None or (ent.end_frame, -ent.track_id) > (best.end_frame, -best.track_id):
@@ -177,6 +207,12 @@ def stitch_tracks(
     same pixels for every shared frame are a duplicate rather than two objects,
     which ``duplicate_min_iou`` decides. Both defaults are derived from the
     tracker's own config in ``s04_track`` rather than chosen here.
+
+    Every geometric comparison uses points backed by a real detection. The first
+    version of this module compared the dying track's *last* point, which at a
+    seam is always an extrapolation, so a merge was refused whenever the Kalman
+    prediction was poor — worst on small fast objects, i.e. exactly during the
+    actions we are trying to record.
     """
     if not tracks:
         return [], {}

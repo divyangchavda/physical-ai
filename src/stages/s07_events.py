@@ -60,6 +60,62 @@ _ACTION_STEMS: tuple[tuple[tuple[str, ...], ActionType], ...] = (
     (("mov",), ActionType.MOVE),
 )
 
+# A preposition changes which primitive a generic verb is. "placing the chopper
+# inside the box" is an INSERT, not a PLACE; the verb alone cannot tell you.
+#
+# This is not a refinement for its own sake. On tt6 Gemini wrote "inside" and
+# "into" on two of four segments — the correct containment relation — and the
+# stem table above threw the preposition away and emitted PLACE, whose implied
+# direction is ONTO. Measured against hand labels, Gemini's direction was 2/4
+# and the pipeline's own output was 0/4: half the shipped direction error was
+# introduced here, after the model had already got it right.
+#
+# Keyed by the action the stems produced, so a promotion can only ever refine a
+# verb that already matched, never invent one.
+_PREPOSITION_PROMOTIONS: dict[ActionType, tuple[tuple[tuple[str, ...], ActionType], ...]] = {
+    ActionType.PLACE: (
+        (("into", "inside", "in to", "within"), ActionType.INSERT),
+        (("out of", "outside"), ActionType.REMOVE),
+    ),
+    ActionType.PICK: (
+        (("out of", "from inside"), ActionType.REMOVE),
+    ),
+    ActionType.MOVE: (
+        (("into", "inside"), ActionType.INSERT),
+        (("out of",), ActionType.REMOVE),
+    ),
+}
+
+# Words that end the matched verb's clause. A preposition after one of these
+# belongs to a different action: in "removes the chopper from the box and then
+# places the box down", the "from" must not reach the "places".
+_CLAUSE_BREAKS = (" and ", " then ", " after ", " before ", " while ", ",", ";")
+
+
+def _clause_after(text: str, offset: int) -> str:
+    """The matched verb's own clause: from the verb to the next clause break."""
+    tail = text[offset:]
+    cut = len(tail)
+    for token in _CLAUSE_BREAKS:
+        found = tail.find(token)
+        if found != -1:
+            cut = min(cut, found)
+    return tail[:cut]
+
+
+def _promote_by_preposition(
+    action: ActionType, text: str, offset: int | None
+) -> ActionType:
+    """Refine a matched verb using the preposition in its own clause."""
+    rules = _PREPOSITION_PROMOTIONS.get(action)
+    if not rules or offset is None:
+        return action
+    clause = _clause_after(text, offset)
+    for prepositions, promoted in rules:
+        if any(re.search(r"\b" + re.escape(p), clause) for p in prepositions):
+            return promoted
+    return action
+
 
 def _strip_object_phrases(action_lower: str, objects: list[str] | None) -> str:
     """Blank out the object names in the action text before matching verbs.
@@ -101,7 +157,8 @@ def _match_action(
             if m is not None
         ]
         if starts:
-            return action, min(starts)
+            offset = min(starts)
+            return _promote_by_preposition(action, text, offset), offset
     return ActionType.UNKNOWN, None
 
 

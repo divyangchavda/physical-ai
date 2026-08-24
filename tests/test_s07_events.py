@@ -65,6 +65,55 @@ def test_map_raw_action_to_type():
     assert _map_raw_action_to_type("doing something unclear") == ActionType.UNKNOWN
 
 
+def test_a_preposition_refines_a_generic_verb():
+    """"Placing X inside Y" is an INSERT. The verb alone cannot tell you.
+
+    These four strings are the real Gemini output for tt6, in
+    tests/fixtures/tt6_vlm_observations.json. Scored against the hand labels,
+    Gemini's direction was 2/4 while the pipeline emitted 0/4 — the stem table
+    matched "plac" and discarded the "inside"/"into" the model had already got
+    right, shipping PLACE (direction ONTO) for a containment action.
+    """
+    objects = ["push chopper", "cardboard box"]
+    assert _map_raw_action_to_type(
+        "placing the push chopper inside the cardboard box", objects
+    ) == ActionType.INSERT
+    assert _map_raw_action_to_type(
+        "placing the push chopper back into the box", objects
+    ) == ActionType.INSERT
+    # No containment preposition: PLACE is the honest answer and must survive.
+    assert _map_raw_action_to_type(
+        "placing the cardboard box on the dining table",
+        ["cardboard box", "dining table"],
+    ) == ActionType.PLACE
+    assert _map_raw_action_to_type("placing the object down") == ActionType.PLACE
+    assert _map_raw_action_to_type(
+        "picking the push chopper out of the cardboard box", objects
+    ) == ActionType.REMOVE
+
+
+def test_a_preposition_cannot_cross_a_clause_break():
+    """The preposition must belong to the clause of the verb that matched.
+
+    "removes the chopper from the box and then places the box back down" already
+    maps to REMOVE by stem precedence. The promotion logic must read only the
+    matched verb's own clause, or a later verb's preposition could rewrite an
+    earlier action.
+    """
+    objects = ["push chopper", "cardboard box"]
+    assert _map_raw_action_to_type(
+        "the person removes the push chopper from the cardboard box "
+        "and then places the box back down",
+        objects,
+    ) == ActionType.REMOVE
+    # "placing" matches first here; the "out of" sits past the clause break and
+    # describes a different action, so it must not promote this to REMOVE.
+    assert _map_raw_action_to_type(
+        "placing the box down, then lifting the chopper out of the container",
+        ["box", "chopper", "container"],
+    ) == ActionType.PLACE
+
+
 def test_extract_events_from_vlm_observations():
     """Test conversion of VLM observations to PhysicalEvents."""
     # Setup minimal context
@@ -376,9 +425,14 @@ def test_verb_is_not_read_out_of_an_object_name():
     # made every action on a push chopper look like a PUSH.
     objects = ["cardboard box", "push chopper"]
     assert _map_raw_action_to_type("unboxing a push chopper", objects) == ActionType.REMOVE
+    # Was asserted as PLACE when this test was written. The hand labels in
+    # tests/fixtures/tt6_ground_truth.json call it INSERT, and they win: "into"
+    # is a containment relation the verb alone does not carry. What this test
+    # actually guards is that "push" is not read out of "push chopper", which
+    # holds either way.
     assert _map_raw_action_to_type(
         "placing the push chopper into the cardboard box", objects
-    ) == ActionType.PLACE
+    ) == ActionType.INSERT
     # A real push of that object still reads as PUSH.
     assert _map_raw_action_to_type(
         "pushing the push chopper across the table", objects

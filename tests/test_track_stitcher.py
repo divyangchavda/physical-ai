@@ -86,6 +86,42 @@ def test_a_long_time_gap_is_not_stitched():
     assert len(entities) == 2
 
 
+def _dying_track(track_id: int, class_name: str, real: range, ghost: range,
+                 x: float, y: float, drift: float = 0.0, conf: float = 0.6) -> Track:
+    """A track as the tracker actually emits one: detections, then a ghost tail.
+
+    ``predict()`` appends a Kalman extrapolation with detection_confidence=0.0 on
+    every frame the track goes unmatched, until deletion. *drift* is how far per
+    frame the extrapolation wanders off, which is what makes the tail unusable as
+    evidence for a merge.
+    """
+    points = [
+        TrackPoint(
+            frame_index=f,
+            timestamp_sec=f / 30.0,
+            bbox=BoundingBox(x1=x, y1=y, x2=x + 60.0, y2=y + 60.0),
+            detection_confidence=conf,
+        )
+        for f in real
+    ]
+    for i, f in enumerate(ghost, start=1):
+        gx = x + drift * i
+        points.append(
+            TrackPoint(
+                frame_index=f,
+                timestamp_sec=f / 30.0,
+                bbox=BoundingBox(x1=gx, y1=y, x2=gx + 60.0, y2=y + 60.0),
+                detection_confidence=0.0,
+            )
+        )
+    return Track(
+        track_id=track_id, class_name=class_name, points=points,
+        start_frame=points[0].frame_index, end_frame=points[-1].frame_index,
+        start_sec=points[0].timestamp_sec, end_sec=points[-1].timestamp_sec,
+        source="kalman_sparse",
+    )
+
+
 def test_the_deletion_lag_tail_is_stitched():
     """The dominant real failure mode, and the one a guessed threshold missed.
 
@@ -98,7 +134,8 @@ def test_the_deletion_lag_tail_is_stitched():
     Predicted points carry detection_confidence=0.0, so the merge keeps the real
     observation at every shared frame and the ghost is dropped.
     """
-    a = _track(3, "person", range(0, 220, 3), x=400, y=300, conf=0.0)
+    a = _dying_track(3, "person", real=range(0, 202, 3), ghost=range(204, 220),
+                     x=400, y=300)
     b = _track(22, "person", range(204, 418, 3), x=402, y=302, conf=0.8)
 
     entities, absorbed = stitch_tracks([a, b], W, H, max_overlap_frames=18)
@@ -107,11 +144,35 @@ def test_the_deletion_lag_tail_is_stitched():
     e = entities[0]
     assert absorbed[3] == [3, 22]
     assert e.start_frame == 0 and e.end_frame == 417
-    shared = [p for p in e.points if 204 <= p.frame_index <= 219]
-    assert shared, "the overlap region must survive the merge"
+    shared = [p for p in e.points if p.frame_index in {204, 207, 210, 213, 216, 219}]
+    assert len(shared) == 6, "the overlap region must survive the merge"
     assert all(p.detection_confidence == 0.8 for p in shared), (
-        "at a shared frame the real detection must beat the predicted ghost"
+        "where both tracks have a point, the real detection must beat the ghost"
     )
+    # Frames only the ghost tail covers keep their predicted point: there is no
+    # competing observation, and the tracker would have written them anyway.
+    ghost_only = [p for p in e.points if p.frame_index in {205, 206, 208}]
+    assert all(p.detection_confidence == 0.0 for p in ghost_only)
+
+
+def test_a_bad_prediction_cannot_block_a_merge():
+    """The bug this run exposed, pinned so it cannot come back.
+
+    Identical to the test above except the Kalman tail drifts 30px/frame, so by
+    frame 219 the ghost box is ~480px from the truth. Comparing that ghost to the
+    successor's first box refuses the merge; comparing the *last real detection*
+    to it accepts. The extrapolation is not evidence about object identity, and
+    it drifts worst on fast-moving objects — which on tt6 meant the chopper
+    during PICK and INSERT, and the person during MOVE.
+    """
+    a = _dying_track(3, "person", real=range(0, 202, 3), ghost=range(204, 220),
+                     x=400, y=300, drift=30.0)
+    b = _track(22, "person", range(204, 418, 3), x=402, y=302, conf=0.8)
+
+    entities, absorbed = stitch_tracks([a, b], W, H, max_overlap_frames=18)
+
+    assert len(entities) == 1, "a poor prediction must not split one person in two"
+    assert absorbed[3] == [3, 22]
 
 
 def test_a_concurrent_duplicate_on_the_same_pixels_is_stitched():
