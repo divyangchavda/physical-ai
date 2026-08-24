@@ -8,7 +8,11 @@ from src.schema.event import PhysicalEvent, ActionType
 from src.schema.segment import CandidateSegment
 from src.schema.track import Track, TrackPoint
 from src.schema.vlm import RawVLMObservation, VLMSegmentStatus
-from src.stages.s07_events import _map_raw_action_to_type, _extract_events_from_vlm_observations
+from src.stages.s07_events import (
+    _map_raw_action_to_type,
+    _order_objects_by_action,
+    _extract_events_from_vlm_observations,
+)
 from src.context import PipelineContext
 from src.config import PipelineConfig
 
@@ -338,6 +342,89 @@ def test_extract_events_complex_action():
     assert event.confidence == 1.0
     assert event.attributes["raw_action"] == "folding and assembling the sides of a cardboard box"
 
+
+
+def test_order_objects_by_action():
+    """The manipulated object beats the container, whatever the list order."""
+    # Both cases are verbatim from run_20260824_051032, where trusting the
+    # VLM's list order named the container as the manipulated object.
+    assert _order_objects_by_action(
+        "placing the push chopper back into the box", ["box", "push chopper"]
+    )[0] == "push chopper"
+    assert _order_objects_by_action(
+        "removes the push chopper from the cardboard box",
+        ["cardboard box", "push chopper"],
+    )[0] == "push chopper"
+    # Head-noun fallback: the action says "box", the list says "cardboard box".
+    assert _order_objects_by_action(
+        "picking up the box", ["dining table", "cardboard box"]
+    )[0] == "cardboard box"
+    # Destination named first is still a destination.
+    assert _order_objects_by_action(
+        "moving the chopper to the table", ["table", "chopper"]
+    )[0] == "chopper"
+    # No action text, or none of the objects mentioned -> original order.
+    assert _order_objects_by_action("", ["box", "chopper"]) == ["box", "chopper"]
+    assert _order_objects_by_action("doing something", ["box", "chopper"]) == [
+        "box", "chopper"
+    ]
+
+
+def test_object_is_the_thing_moved_not_the_container():
+    """Event 3 of run_20260824_051032: chopper into box resolved to the box."""
+    config = PipelineConfig(stub_mode=False)
+    ctx = PipelineContext(
+        config=config,
+        video_path=Path("test.mp4"),
+        output_dir=Path("output"),
+    )
+    ctx.candidate_segments = [
+        CandidateSegment(
+            segment_id="seg_003",
+            track_ids=[40, 44],
+            start_frame=0,
+            end_frame=100,
+            start_sec=16.6,
+            end_sec=24.9,
+            trigger_reason="test",
+            confidence=0.8,
+            source="test",
+            status="PENDING",
+        )
+    ]
+    # The box track is longer-lived than the chopper, so a tie-break on point
+    # count alone would also pick the box. Only the action text disambiguates.
+    ctx.tracks = [
+        _make_track(40, "cardboard box", n_points=30),
+        _make_track(44, "push chopper", n_points=5),
+    ]
+    ctx.vlm_observations = [
+        RawVLMObservation(
+            observation_id="obs_003",
+            segment_id="seg_003",
+            status=VLMSegmentStatus.SUCCESS,
+            backend="GEMINI",
+            model_name="gemini-test",
+            segment_start_sec=16.6,
+            segment_end_sec=24.9,
+            actor="person",
+            active_hand="RIGHT",
+            objects=["box", "push chopper"],
+            raw_action="placing the push chopper back into the box",
+            start_time_sec=16.6,
+            end_time_sec=24.9,
+            state_change="chopper inside the box",
+            visible_facts="hand holding the chopper over the box",
+            inference="placement into container",
+            uncertainty="none",
+            confidence=0.9,
+        )
+    ]
+
+    events = _extract_events_from_vlm_observations(ctx)
+    assert len(events) == 1
+    assert events[0].object_track_id == 44
+    assert events[0].attributes["object_label"] == "push chopper"
 
 
 if __name__ == "__main__":

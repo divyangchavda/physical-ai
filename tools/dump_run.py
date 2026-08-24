@@ -37,7 +37,8 @@ def _rows(data) -> list:
         return []
     if isinstance(data, list):
         return data
-    for key in ("scores", "nodes", "events", "items"):
+    for key in ("scores", "nodes", "events", "transitions", "segments",
+                "observations", "tracks", "items"):
         if isinstance(data.get(key), list):
             return data[key]
     return []
@@ -101,19 +102,26 @@ def main(argv: list[str]) -> int:
     for n in nodes:
         tid = n.get("track_id")
         print(f"  {n.get('node_id')} role={n.get('role')} track={tid}({cls.get(tid)}) "
-              f"label={n.get('label') or n.get('semantic_label')!r}")
+              f"label={n.get('semantic_label')!r}")
     for e in edges:
-        print(f"  {e.get('source')} -{e.get('relation') or e.get('action')}-> "
-              f"{e.get('target')} res={e.get('actor_resolution')}/"
-              f"{e.get('object_resolution')}")
+        # GraphEdge names these source_node_id/target_node_id, not source/target.
+        print(f"  {e.get('source_node_id')} -{e.get('action')}-> "
+              f"{e.get('target_node_id')} res={e.get('actor_resolution')}/"
+              f"{e.get('object_resolution')} tp={e.get('timing_precision')} "
+              f"t=[{e.get('start_sec')},{e.get('end_sec')}]")
 
     scores = _rows(_load(run_dir, "quality_scores.json"))
     print(f"\nSCORES {len(scores)}")
     for q in scores:
-        keys = ("composite_score", "tier", "actor_resolution", "object_resolution",
-                "trajectory_support", "timing_precision")
-        print(f"  {q.get('event_id')} " + " ".join(
-            f"{k}={q.get(k)}" for k in keys if k in q))
+        # QualityScore nests the sub-scores under `components` and calls the
+        # tier `quality_tier`; reading them flat printed only the composite.
+        comp = q.get("components") or {}
+        parts = " ".join(f"{k}={v}" for k, v in sorted(comp.items()))
+        print(f"  {q.get('event_id')} composite={q.get('composite_score')} "
+              f"tier={q.get('quality_tier')} vlm_conf={q.get('vlm_confidence')}")
+        print(f"      {parts}")
+        for reason in _rows(q.get("reasons")):
+            print(f"      ! {reason}")
 
     ev = _load(run_dir, "evaluation.json") or {}
     print(f"\nEVAL overall={ev.get('overall_status')} health={ev.get('health')} "

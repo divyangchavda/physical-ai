@@ -144,28 +144,105 @@ def _match_label(vlm_label: str, class_name: str) -> int:
     return 0
 
 
+def _mention_index(label: str, action_lower: str) -> int | None:
+    """Character offset where *label* is mentioned in the action text, or None.
+
+    Falls back to the head noun ("cardboard box" -> "box") because the VLM
+    names the same thing one way in ``objects`` and another in ``raw_action``.
+    """
+    phrase = label.strip().lower()
+    if not phrase:
+        return None
+    idx = action_lower.find(phrase)
+    if idx >= 0:
+        return idx
+    head = phrase.split()[-1]
+    idx = action_lower.find(head)
+    return idx if idx >= 0 else None
+
+
+# Prepositions that introduce a destination or container rather than the thing
+# in the hand: "into the box", "from the shelf", "onto the table".
+_LOCATIVE_PREPOSITIONS = (
+    "into", "in", "onto", "on", "from", "out of", "off", "inside", "under",
+    "over", "at", "against", "toward", "towards", "near", "beside", "to",
+)
+_DETERMINERS = (" the", " a", " an", " its", " his", " her", " their")
+
+
+def _is_locative_mention(action_lower: str, idx: int) -> bool:
+    """True when the phrase at *idx* is the object of a locative preposition."""
+    prefix = action_lower[:idx].rstrip()
+    for det in _DETERMINERS:
+        if prefix.endswith(det):
+            prefix = prefix[: -len(det)].rstrip()
+            break
+    return any(
+        prefix == prep or prefix.endswith(" " + prep)
+        for prep in _LOCATIVE_PREPOSITIONS
+    )
+
+
+def _order_objects_by_action(
+    raw_action: str | None, vlm_objects: list[str]
+) -> list[str]:
+    """Reorder *vlm_objects* so the thing the verb acts on comes first.
+
+    The VLM's ``objects`` order is not reliable. For "placing the push chopper
+    back into the box" it returned ``["box", "push chopper"]``, so trusting
+    position named the container as the manipulated object. English puts the
+    direct object before any prepositional phrase, so the object mentioned
+    earliest in the action text is the manipulated one — and anything led by a
+    locative preposition is a destination, not the object, however early it
+    appears. Objects the action never mentions keep their original order at the
+    back; if it mentions none, the original order stands.
+    """
+    action_lower = (raw_action or "").lower()
+    if not action_lower:
+        return list(vlm_objects)
+
+    mentioned: list[tuple[tuple[bool, int, int], str]] = []
+    unmentioned: list[str] = []
+    for pos, label in enumerate(vlm_objects):
+        idx = _mention_index(label, action_lower)
+        if idx is None:
+            unmentioned.append(label)
+        else:
+            key = (_is_locative_mention(action_lower, idx), idx, pos)
+            mentioned.append((key, label))
+
+    if not mentioned:
+        return list(vlm_objects)
+    mentioned.sort(key=lambda m: m[0])
+    return [label for _, label in mentioned] + unmentioned
+
+
 def _resolve_object_track(
     vlm_objects: list[str] | None,
     segment_tracks: list,
     person_classes: set[str],
     background_classes: set[str],
+    raw_action: str | None = None,
 ) -> tuple[int | None, str | None]:
     """Resolve the manipulated object to a track id, or (None, label).
 
-    Walks ``vlm_objects`` in order because the prompt asks for primary
-    manipulated objects first. Scene classes are excluded — a "dining table"
-    is never what the hand is acting on. Returns the label even when no track
-    matches, so downstream stages can still say *what* went unresolved.
+    Candidate objects are ordered by what the action text says the hand is
+    acting on rather than by the VLM's list order — see
+    :func:`_order_objects_by_action`. Scene classes are excluded: a "dining
+    table" is never what the hand is acting on. Returns the label even when no
+    track matches, so downstream stages can still say *what* went unresolved.
     """
     if not vlm_objects:
         return None, None
+
+    ordered = _order_objects_by_action(raw_action, vlm_objects)
 
     excluded = person_classes | background_classes
     candidates = [
         t for t in segment_tracks if t.class_name.lower() not in excluded
     ]
 
-    for label in vlm_objects:
+    for label in ordered:
         scored = [
             (_match_label(label, t.class_name), len(t.points), t.track_id)
             for t in candidates
@@ -176,7 +253,8 @@ def _resolve_object_track(
             best = max(scored, key=lambda s: (s[0], s[1]))
             return best[2], label
 
-    return None, vlm_objects[0]
+    return None, ordered[0]
+
 
 
 def _extract_events_from_vlm_observations(ctx: PipelineContext) -> list[PhysicalEvent]:
@@ -208,7 +286,8 @@ def _extract_events_from_vlm_observations(ctx: PipelineContext) -> list[Physical
         ]
         actor_track_id = _resolve_actor_track(segment_tracks, person_classes)
         object_track_id, object_label = _resolve_object_track(
-            obs.objects, segment_tracks, person_classes, background_classes
+            obs.objects, segment_tracks, person_classes, background_classes,
+            raw_action=obs.raw_action,
         )
 
         # Map raw_action to ActionType

@@ -13,8 +13,12 @@ logger = logging.getLogger(__name__)
 
 def _write_output(ctx: PipelineContext, status: str) -> None:
     """Serialize the extracted state transitions to states.json."""
-    out_file = ctx.config.output_dir / "states.json"
-    
+    # ctx.output_dir is this run's directory; ctx.config.output_dir is its
+    # parent. Writing to the parent put states.json outside the run and let
+    # every subsequent run overwrite it.
+    ctx.output_dir.mkdir(parents=True, exist_ok=True)
+    out_file = ctx.output_dir / "states.json"
+
     output_data = {
         "metadata": {
             "video": str(ctx.video_path),

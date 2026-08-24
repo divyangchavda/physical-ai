@@ -14,8 +14,11 @@ logger = logging.getLogger(__name__)
 
 def _write_output(ctx: PipelineContext, status: str) -> None:
     """Serialize the extracted events to events.json."""
-    out_file = ctx.config.output_dir / "events.json"
-    
+    # ctx.output_dir is this run's directory; ctx.config.output_dir is its
+    # parent, which is not guaranteed to exist yet and is shared across runs.
+    ctx.output_dir.mkdir(parents=True, exist_ok=True)
+    out_file = ctx.output_dir / "events.json"
+
     output_data = {
         "metadata": {
             "video": str(ctx.video_path),
