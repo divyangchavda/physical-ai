@@ -1,7 +1,7 @@
 """VisionLanguageModel abstract base class.
 
-The pipeline is identical regardless of which backend (LOCAL_MODEL or
-REMOTE_MODEL) is active. No provider SDK is imported at this level.
+The pipeline is identical regardless of which backend is active. No provider
+SDK is imported at this level.
 """
 from __future__ import annotations
 
@@ -13,12 +13,16 @@ from typing import Literal
 class VisionLanguageModel(ABC):
     """Interface for all VLM backends.
 
-    Backend categories:
+    Backend identifiers:
       - ``"LOCAL_MODEL"`` — runs entirely on local hardware; no network calls.
-      - ``"REMOTE_MODEL"`` — calls an external inference endpoint.
+      - ``"REMOTE_MODEL"`` — calls a generic external inference endpoint.
+      - ``"GEMINI"`` — calls the Google Gemini API. Remote, but named
+        separately: this string is the provenance recorded on every
+        observation and, via s07, the ``source`` on every shipped event.
+        Returning ``"REMOTE_MODEL"`` here made Gemini output indistinguishable
+        from any other remote endpoint in the delivered data.
 
-    Model selection and provider are intentionally NOT fixed at this level.
-    They are configured when the VLM stage is implemented.
+    Model selection is intentionally NOT fixed at this level.
 
     Contract:
       - ``analyze_segment()`` returns a raw dict (may be empty on failure).
@@ -29,8 +33,8 @@ class VisionLanguageModel(ABC):
 
     @property
     @abstractmethod
-    def backend(self) -> Literal["LOCAL_MODEL", "REMOTE_MODEL"]:
-        """Which backend category this implementation belongs to."""
+    def backend(self) -> Literal["LOCAL_MODEL", "REMOTE_MODEL", "GEMINI"]:
+        """Which backend this implementation belongs to."""
 
     @abstractmethod
     def analyze_segment(

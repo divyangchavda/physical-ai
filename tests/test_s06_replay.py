@@ -164,3 +164,78 @@ def test_replay_writes_observations_to_this_run(replay_ctx):
     assert [r["segment_id"] for r in written] == [
         "cand_0000_7ad163", "cand_0003_82e8cf"
     ]
+
+
+def test_replay_keeps_every_observation_for_one_segment(replay_ctx, tmp_path):
+    """A segment can hold several observations, and none may be dropped.
+
+    Gemini returns an array for some clips, which s06 turns into one
+    observation per entry. Keying the replay index by bounds alone would keep
+    only the first and silently lose the rest.
+    """
+    ctx, _ = replay_ctx
+    recorded = [
+        _observation("cand_0000_abb6fd", 0.0, 8.3, "opening the cardboard box"),
+        _observation("cand_0000_abb6fd", 0.0, 8.3, "removing the push chopper"),
+        _observation("cand_0001_71608a", 24.9, 33.2, "unboxing a push chopper"),
+    ]
+    obs_file = tmp_path / "multi.json"
+    obs_file.write_text(json.dumps(recorded), encoding="utf-8")
+    ctx.config.vlm.replay_from = str(obs_file)
+
+    status = s06_vlm.run(ctx)
+    assert status.status == "OK"
+    assert len(ctx.vlm_observations) == 3
+    # Both entries bind to the same segment id, in recorded order.
+    first_two = [o for o in ctx.vlm_observations if o.segment_id == "cand_0000_7ad163"]
+    assert [o.raw_action for o in first_two] == [
+        "opening the cardboard box", "removing the push chopper"
+    ]
+
+
+def test_committed_tt6_fixture_replays(tmp_path):
+    """tests/fixtures/tt6_vlm_observations.json must work as a replay source.
+
+    This is the file every future tt6 verification run replays from, so it has
+    to stay loadable and stay bound to tt6's real segment bounds. Those bounds
+    are fixed by the video and the sampling plan, and were identical across the
+    06:34 and 06:54 Kaggle runs.
+    """
+    fixture = Path(__file__).parent / "fixtures" / "tt6_vlm_observations.json"
+    assert fixture.is_file(), fixture
+
+    config = PipelineConfig(stub_mode=False)
+    config.vlm.enabled = True
+    config.vlm.backend = "GEMINI"
+    config.vlm.replay_from = str(fixture)
+
+    ctx = PipelineContext(
+        video_path=Path("tt6.mp4"),
+        output_dir=tmp_path / "output",
+        config=config,
+    )
+    bounds = [(0.0, 8.3), (8.3, 16.6), (16.6, 24.900000000000002),
+              (24.900000000000002, 33.2)]
+    ctx.candidate_segments = [
+        CandidateSegment(
+            segment_id=f"cand_{i:04d}_live{i}", start_frame=i, end_frame=i + 1,
+            start_sec=s, end_sec=e, trigger_reason="test",
+        )
+        for i, (s, e) in enumerate(bounds)
+    ]
+
+    status = s06_vlm.run(ctx)
+    assert status.status == "OK", status.message
+    assert len(ctx.vlm_observations) == 4
+    assert [o.segment_id for o in ctx.vlm_observations] == [
+        "cand_0000_live0", "cand_0001_live1", "cand_0002_live2", "cand_0003_live3"
+    ]
+    assert [o.raw_action for o in ctx.vlm_observations] == [
+        "placing the push chopper inside the cardboard box",
+        "opening and unpacking a cardboard box",
+        "placing the push chopper back into the box",
+        "the person removes the push chopper from the cardboard box and then "
+        "places the box back down",
+    ]
+    # Provenance was corrected in the fixture: it really was Gemini.
+    assert all(o.backend == "GEMINI" for o in ctx.vlm_observations)

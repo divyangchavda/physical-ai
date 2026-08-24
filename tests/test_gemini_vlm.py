@@ -70,9 +70,19 @@ class TestGeminiVLMConstruction:
             reload(mod)
             mod.GeminiVLM()
 
-    def test_backend_is_remote(self):
+    def test_backend_identifies_the_provider(self):
+        """Was "REMOTE_MODEL", which RemoteVLM also returns.
+
+        s07 builds every event's source as f"vlm:{obs.backend.lower()}", so
+        that made Gemini output indistinguishable from any other remote
+        endpoint in the delivered data.
+        """
         vlm, _, _ = _make_gemini_vlm()
-        assert vlm.backend == "REMOTE_MODEL"
+        assert vlm.backend == "GEMINI"
+
+        from src.models.remote_vlm import RemoteVLM
+
+        assert RemoteVLM(model_name="x").backend == "REMOTE_MODEL"
 
     def test_model_name_stored(self):
         vlm, _, _ = _make_gemini_vlm(model_name="gemini-2.5-flash")

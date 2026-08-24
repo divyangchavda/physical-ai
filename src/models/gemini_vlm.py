@@ -71,7 +71,7 @@ class GeminiVLM(VisionLanguageModel):
             raise OSError(
                 "GEMINI_API_KEY environment variable is not set. "
                 "Obtain a key from https://aistudio.google.com/ and set it "
-                "before running the pipeline with backend=REMOTE_MODEL."
+                "before running the pipeline with vlm.backend=GEMINI."
             )
         # Import lazily so the rest of the repo does not require google-genai
         # when running in LocalVLM / stub mode.
@@ -92,8 +92,12 @@ class GeminiVLM(VisionLanguageModel):
     # ── VisionLanguageModel interface ────────────────────────────────────────
 
     @property
-    def backend(self) -> Literal["LOCAL_MODEL", "REMOTE_MODEL"]:
-        return "REMOTE_MODEL"
+    def backend(self) -> Literal["LOCAL_MODEL", "REMOTE_MODEL", "GEMINI"]:
+        # Was "REMOTE_MODEL", which is what RemoteVLM returns. s07 builds every
+        # event's source as f"vlm:{obs.backend.lower()}", so every event this
+        # pipeline has ever shipped claimed source="vlm:remote_model" with no
+        # record of which provider produced it.
+        return "GEMINI"
 
     @property
     def model_name(self) -> str:

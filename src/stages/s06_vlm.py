@@ -48,18 +48,32 @@ Rules:
 """
 
 def extract_json(text: str) -> str:
-    """Extract JSON from a string that might contain markdown blocks."""
+    """Extract a JSON object *or array* from a string that may contain markdown.
+
+    Gemini answers with a bare object for most clips but sometimes returns an
+    array — one entry per action it saw. Scraping the first ``{`` to the last
+    ``}`` happened to work while those arrays held a single element; on a
+    two-element array it yields ``{...}, {...}``, which is not valid JSON and
+    failed the whole segment. Pick the container by whichever bracket opens
+    first and close with its matching kind.
+    """
     text = text.strip()
-    match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL | re.IGNORECASE)
+    match = re.search(
+        r'```(?:json)?\s*([\[{].*[\]}])\s*```', text, re.DOTALL | re.IGNORECASE
+    )
     if match:
         return match.group(1)
-    
-    # fallback: try finding the first { and last }
-    start = text.find('{')
-    end = text.rfind('}')
-    if start != -1 and end != -1 and end > start:
-        return text[start:end+1]
-        
+
+    # fallback: the earliest of { or [ decides which container we are reading
+    obj_start, arr_start = text.find('{'), text.find('[')
+    candidates = [(i, o, c) for i, o, c in
+                  ((obj_start, '{', '}'), (arr_start, '[', ']')) if i != -1]
+    if candidates:
+        start, _open, close = min(candidates)
+        end = text.rfind(close)
+        if end > start:
+            return text[start:end + 1]
+
     return text
 
 
@@ -110,33 +124,36 @@ def _replay_observations(
     if not isinstance(raw, list) or not raw:
         return [], f"replay_from file holds no observations: {file_path}"
 
-    by_bounds: dict[tuple[float, float], dict] = {}
+    by_bounds: dict[tuple[float, float], list[dict]] = {}
     for record in raw:
         if not isinstance(record, dict):
             continue
         start, end = record.get("segment_start_sec"), record.get("segment_end_sec")
         if start is None or end is None:
             continue
-        by_bounds.setdefault(_bounds_key(float(start), float(end)), record)
+        # A segment may hold several observations (Gemini can return an array),
+        # so every match is kept rather than only the first.
+        by_bounds.setdefault(_bounds_key(float(start), float(end)), []).append(record)
 
     observations: list[RawVLMObservation] = []
     missing: list[str] = []
     for seg in ctx.candidate_segments:
-        record = by_bounds.get(_bounds_key(seg.start_sec, seg.end_sec))
-        if record is None:
+        matched = by_bounds.get(_bounds_key(seg.start_sec, seg.end_sec))
+        if not matched:
             missing.append(f"{seg.segment_id} [{seg.start_sec:.2f},{seg.end_sec:.2f}]")
             continue
-        try:
-            obs = RawVLMObservation.model_validate(record)
-        except ValueError as exc:
-            return [], f"replayed observation failed validation: {exc}"
-        # Backend and model_name are left as recorded: that is the true
-        # provenance of this text. Only the segment binding is rewritten.
-        observations.append(obs.model_copy(update={
-            "segment_id": seg.segment_id,
-            "segment_start_sec": seg.start_sec,
-            "segment_end_sec": seg.end_sec,
-        }))
+        for record in matched:
+            try:
+                obs = RawVLMObservation.model_validate(record)
+            except ValueError as exc:
+                return [], f"replayed observation failed validation: {exc}"
+            # Backend and model_name are left as recorded: that is the true
+            # provenance of this text. Only the segment binding is rewritten.
+            observations.append(obs.model_copy(update={
+                "segment_id": seg.segment_id,
+                "segment_start_sec": seg.start_sec,
+                "segment_end_sec": seg.end_sec,
+            }))
 
     if missing:
         return [], (
@@ -249,28 +266,43 @@ def run(ctx: PipelineContext) -> PipelineStageStatus:
                 )
                 
                 json_str = extract_json(raw_response_text)
-                data = json.loads(json_str)
-                
-                # Convert relative offsets to absolute timestamps BEFORE validation
-                if data.get("start_time_sec") is not None:
-                    data["start_time_sec"] = seg.start_sec + float(data["start_time_sec"])
-                if data.get("end_time_sec") is not None:
-                    data["end_time_sec"] = seg.start_sec + float(data["end_time_sec"])
-                    
-                obs = RawVLMObservation(
-                    observation_id=f"obs_{uuid.uuid4().hex[:8]}",
-                    segment_id=seg.segment_id,
-                    status=VLMSegmentStatus.SUCCESS,
-                    backend=vlm.backend,
-                    model_name=vlm.model_name,
-                    prompt_version="v1",
-                    segment_start_sec=seg.start_sec,
-                    segment_end_sec=seg.end_sec,
-                    raw_response=raw_response_text,
-                    **data
-                )
-                
-                ctx.vlm_observations.append(obs)
+                parsed = json.loads(json_str)
+
+                # A bare object is treated as a one-entry list so both response
+                # shapes take a single code path.
+                records = parsed if isinstance(parsed, list) else [parsed]
+                if not records:
+                    raise ValueError("VLM returned an empty observation list")
+                if not all(isinstance(r, dict) for r in records):
+                    raise ValueError(
+                        "VLM observation list contains a non-object entry"
+                    )
+
+                # Build and validate every entry before appending any, so a bad
+                # second entry cannot leave a half-written segment behind.
+                batch: list[RawVLMObservation] = []
+                for record in records:
+                    data = dict(record)
+                    # Convert relative offsets to absolute timestamps BEFORE validation
+                    if data.get("start_time_sec") is not None:
+                        data["start_time_sec"] = seg.start_sec + float(data["start_time_sec"])
+                    if data.get("end_time_sec") is not None:
+                        data["end_time_sec"] = seg.start_sec + float(data["end_time_sec"])
+
+                    batch.append(RawVLMObservation(
+                        observation_id=f"obs_{uuid.uuid4().hex[:8]}",
+                        segment_id=seg.segment_id,
+                        status=VLMSegmentStatus.SUCCESS,
+                        backend=vlm.backend,
+                        model_name=vlm.model_name,
+                        prompt_version="v1",
+                        segment_start_sec=seg.start_sec,
+                        segment_end_sec=seg.end_sec,
+                        raw_response=raw_response_text,
+                        **data
+                    ))
+
+                ctx.vlm_observations.extend(batch)
                 success = True
                 
             except json.JSONDecodeError as e:
@@ -302,12 +334,16 @@ def run(ctx: PipelineContext) -> PipelineStageStatus:
     _write_output(ctx)
     
     success_count = sum(1 for o in ctx.vlm_observations if o.status == VLMSegmentStatus.SUCCESS)
+    failed_count = sum(1 for o in ctx.vlm_observations if o.status == VLMSegmentStatus.FAILED)
 
+    # Observations can outnumber segments now that an array response yields one
+    # observation per entry, so FAILED is counted rather than subtracted.
     logger.info(
-        "[%s] Processed %d segments | %d SUCCESS, %d FAILED in %.3fs",
-        STAGE, len(ctx.candidate_segments), success_count, len(ctx.candidate_segments) - success_count, duration
+        "[%s] Processed %d segments | %d observations: %d SUCCESS, %d FAILED in %.3fs",
+        STAGE, len(ctx.candidate_segments), len(ctx.vlm_observations),
+        success_count, failed_count, duration
     )
-    
+
     msg = f"VLM generated {success_count} successful observations from {len(ctx.candidate_segments)} segments."
     
     return PipelineStageStatus(
