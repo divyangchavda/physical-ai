@@ -2,7 +2,7 @@
 
 These are the only ground truth the project has, and two files now hold them:
 ``tt6_ground_truth.json`` for the four-copy video and
-``tt6_single_ground_truth.json`` for the source clip on its own. The second was
+``tt7_ground_truth.json`` for tt7.mp4, which IS that source clip. The second was
 derived from the first, so nothing but a test stops them diverging — and a
 divergence would be invisible, showing up only as a score that moved for no
 reason anybody could name.
@@ -18,7 +18,7 @@ from pathlib import Path
 
 FIXTURES = Path(__file__).parent / "fixtures"
 MULTI = FIXTURES / "tt6_ground_truth.json"
-SINGLE = FIXTURES / "tt6_single_ground_truth.json"
+SINGLE = FIXTURES / "tt7_ground_truth.json"
 
 
 def _load(path: Path) -> dict:

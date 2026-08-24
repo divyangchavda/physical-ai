@@ -3,7 +3,8 @@
     "Hand-labelled by the repository owner on 2026-08-24 after watching tt6.mp4.",
     "The seven actions are the owner's own words and choices, unedited, copied",
     "verbatim from tt6_ground_truth.json -- the SAME labels, since tt6.mp4 is",
-    "this clip repeated four times.",
+    "tt7.mp4 IS that source clip, uploaded on its own on 2026-08-24.",
+    "tt7.mp4 repeated four times.",
     "",
     "This file exists so the source clip can be run on its own. repeats=1, so",
     "ground truth is 7 actions and the times are already absolute: no folding,",
@@ -25,7 +26,7 @@
     "template offered no value for a lateral move. That is a shortcoming of the",
     "template, and 'OFF' is kept as written."
   ],
-  "video_file": "tt6_single.mp4",
+  "video_file": "tt7.mp4",
   "total_duration_sec": 8.3,
   "repeats": 1,
   "people_visible": 1,

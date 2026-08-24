@@ -1,0 +1,52 @@
+# KAGGLE — tt7 with DECOY CLASSES, vocabulary A: describe the surface.
+#
+# Baseline finding this exists to fix (run_20260824_130923, tt6): 52% of
+# "push chopper" detections land after the labels say the box is closed, and
+# crops of those frames show the carton's own printed artwork — a pink panel
+# reading MAKE IN INDIA with the product pictured on it. GroundingDINO grounds
+# phrases: every box goes to its best-matching span among the labels it was
+# GIVEN, so with no better option the printed chopper became "push chopper".
+#
+# Confidence cannot separate them. The printed panel scored 0.62-0.67 while
+# genuine detections scored 0.41-0.55, so raising a threshold removes the real
+# object first. The fix has to be a competing label, not a number.
+#
+# The two decoy phrases are a HYPOTHESIS, not a derived value: nothing in any
+# config or run output says which words win a box away from "push chopper".
+# Vocabulary B tries the other approach, and the audit decides between them.
+#
+# vlm.enabled=false — the phantom rate is measured from tracks_raw.json, which
+# s04 writes. No Gemini call, so comparing vocabularies costs nothing but GPU.
+
+output_dir: "/kaggle/working/runs/tt7_decoy_a"
+
+frame_sampling:
+  every_n_frames: 3
+
+detector:
+  backend: "groundingdino_hf"
+  model: "IDEA-Research/grounding-dino-tiny"
+  confidence: 0.20
+  text_threshold: 0.25
+  # A: name the physical surface the artwork is on. The decoys go LAST so the
+  # four real classes keep their class_ids and the runs stay comparable.
+  text_prompt: "person . cardboard box . push chopper . dining table . printed label on box . product photo ."
+  decoy_classes: ["printed label on box", "product photo"]
+  device: "auto"
+  nms_iou: 0.45
+  drop_unlabeled: true
+
+tracker:
+  backend: "kalman_sparse"
+  iou_threshold: 0.20
+  max_age: 15
+  min_hits: 3
+  max_missed_detections: 5
+
+segment:
+  person_classes: ["person"]
+  background_classes: ["dining table"]
+  max_segment_duration_sec: 10.0
+
+vlm:
+  enabled: false

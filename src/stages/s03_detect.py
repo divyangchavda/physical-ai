@@ -69,6 +69,7 @@ def _build_detector(ctx: PipelineContext) -> ObjectDetector:
                 model_id=model_id,
                 nms_iou=ctx.config.detector.nms_iou,
                 drop_unlabeled=getattr(ctx.config.detector, 'drop_unlabeled', True),
+                decoy_classes=getattr(ctx.config.detector, 'decoy_classes', None),
             )
 
         elif backend == 'groundingdino':

@@ -41,6 +41,17 @@ class DetectorConfig(BaseModel):
     # object. Boxes with an empty grounded span cleared the box threshold but
     # matched no text, so they carry no class. Both are filtered by default.
     drop_unlabeled: bool = True
+    # Prompt labels that exist only to absorb a confusion, then are discarded.
+    #
+    # GroundingDINO assigns every box to its best-matching span among the labels
+    # it was given, so a label it was never offered cannot win: on tt6 the push
+    # chopper printed on the carton had nowhere to land except "push chopper",
+    # and scored 0.62-0.67 — HIGHER than the real chopper at 0.41-0.55. Raising
+    # the thresholds therefore removes real detections before phantom ones.
+    # Naming the artwork in the prompt gives those boxes a better home; listing
+    # that name here drops them after the match, so nothing downstream sees a
+    # class the schema does not know about.
+    decoy_classes: list[str] = []
     # GroundingDINO weights/config location. None → ~/GroundingDINO/ defaults.
     # Set these to read weights from a read-only mount (e.g. Kaggle /kaggle/input/...).
     model_checkpoint: str | None = None

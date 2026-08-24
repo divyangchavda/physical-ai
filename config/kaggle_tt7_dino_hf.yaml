@@ -1,6 +1,6 @@
-# KAGGLE — the SOURCE CLIP of tt6 on its own (~8.3s, 249 frames).
+# KAGGLE — tt7, the SOURCE CLIP of tt6 on its own (~8.3s, 249 frames).
 #
-# tt6.mp4 is this clip copied four times. Running the single copy removes the
+# tt6.mp4 is tt7.mp4 copied four times. Running the single copy removes the
 # hard cuts, so every track break is real fragmentation rather than a splice,
 # and the 7 hand labels line up 1:1 with no folding arithmetic anywhere.
 #
@@ -13,10 +13,10 @@
 # changing two things at once would make a score difference unattributable.
 #
 # Usage on Kaggle:
-#   python -m src.pipeline /kaggle/input/<...>/tt6_single.mp4 \
-#       --config config/kaggle_tt6_single_dino_hf.yaml --verbose
+#   python -m src.pipeline /kaggle/input/<...>/tt7.mp4 \
+#       --config config/kaggle_tt7_dino_hf.yaml --verbose
 
-output_dir: "/kaggle/working/runs/tt6_single_dino_hf"
+output_dir: "/kaggle/working/runs/tt7_dino_hf"
 
 frame_sampling:
   every_n_frames: 3         # ~83 detection frames over the 249-frame clip

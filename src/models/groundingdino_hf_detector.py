@@ -54,6 +54,7 @@ class GroundingDINOHFDetector(ObjectDetector):
         model_id: str = DEFAULT_MODEL_ID,
         nms_iou: float | None = 0.45,
         drop_unlabeled: bool = True,
+        decoy_classes: list[str] | None = None,
     ) -> None:
         """
         Args:
@@ -71,6 +72,11 @@ class GroundingDINOHFDetector(ObjectDetector):
             drop_unlabeled: Discard boxes whose grounded text span is empty.
                 These pass box_threshold but no token clears text_threshold,
                 so they carry no class information and are useless downstream.
+            decoy_classes: Labels present in *text_prompt* purely to attract a
+                known confusion, discarded after matching. The detector must be
+                offered a span before a box can be assigned to it, so a decoy
+                only works if it is also in the prompt — hence two settings for
+                one idea. Matched case-insensitively against the prompt labels.
         """
         self.box_threshold = box_threshold
         self.text_threshold = text_threshold
@@ -103,14 +109,31 @@ class GroundingDINOHFDetector(ObjectDetector):
 
         self._unmatched_spans: dict[str, int] = {}
         self._n_dropped_unlabeled = 0
+        self._n_dropped_decoy = 0
         self._n_suppressed_nms = 0
         self._n_kept = 0
 
+        # Resolved against the parsed vocabulary rather than kept as free text,
+        # so a decoy naming a class that is not in the prompt fails loudly here
+        # instead of silently never firing.
+        self._decoy_ids: set[int] = set()
+        for name in decoy_classes or []:
+            key = name.strip().lower()
+            if key not in self._label_to_id:
+                raise ValueError(
+                    f"decoy class {name!r} is not in the text prompt. A decoy "
+                    f"only absorbs a confusion if the detector is offered it as "
+                    f"a span; add it to detector.text_prompt. "
+                    f"Prompt labels: {self.labels}"
+                )
+            self._decoy_ids.add(self._label_to_id[key])
+
         logger.info(
             "GroundingDINO-HF: %d labels %s (unmatched bucket -> class_id %d, "
-            "nms_iou=%s, drop_unlabeled=%s)",
+            "nms_iou=%s, drop_unlabeled=%s, decoys=%s)",
             len(self.labels), self.labels, self._unmatched_id,
             self.nms_iou, self.drop_unlabeled,
+            sorted(self.labels[i] for i in self._decoy_ids),
         )
 
     # ────────────────────────────────────────────────────────────── lifecycle
@@ -160,11 +183,13 @@ class GroundingDINOHFDetector(ObjectDetector):
                 dict(sorted(self._unmatched_spans.items(),
                             key=lambda kv: -kv[1])[:10]),
             )
-        total = self._n_kept + self._n_dropped_unlabeled + self._n_suppressed_nms
+        total = (self._n_kept + self._n_dropped_unlabeled
+                 + self._n_dropped_decoy + self._n_suppressed_nms)
         logger.info(
             "GroundingDINO-HF filtering: %d raw -> %d kept "
-            "(%d dropped unlabeled, %d suppressed by NMS)",
-            total, self._n_kept, self._n_dropped_unlabeled, self._n_suppressed_nms,
+            "(%d dropped unlabeled, %d dropped as decoy, %d suppressed by NMS)",
+            total, self._n_kept, self._n_dropped_unlabeled,
+            self._n_dropped_decoy, self._n_suppressed_nms,
         )
         logger.info("GroundingDINO-HF unloaded")
 
@@ -293,6 +318,13 @@ class GroundingDINOHFDetector(ObjectDetector):
                     continue
 
                 class_id, class_name = self._resolve_class(text)
+                if class_id in self._decoy_ids:
+                    # The decoy did its job by winning this box away from a real
+                    # class. Dropped before NMS: per-class NMS means a decoy box
+                    # could never suppress a real one anyway, so the outcome is
+                    # identical and this does less work.
+                    self._n_dropped_decoy += 1
+                    continue
                 kept.append((x1, y1, x2, y2, float(score), class_id, class_name))
 
             # ── 2. per-class NMS ────────────────────────────────────────────
