@@ -141,14 +141,14 @@ class KalmanBoxTracker:
         r = 10.0
         self.R = r * np.eye(4, dtype=np.float32)
     
-    def predict(self) -> BoundingBox:
-        """Predict next state and return predicted bounding box."""
+    def predict(self) -> tuple[BoundingBox, bool]:
+        """Predict next state. Returns (predicted box, box_is_fabricated)."""
         # Predict state: x = F * x
         self.x = self.F @ self.x
-        
+
         # Predict covariance: P = F * P * F^T + Q
         self.P = self.F @ self.P @ self.F.T + self.Q
-        
+
         # Convert state to bounding box
         return self._state_to_bbox()
     
@@ -173,19 +173,45 @@ class KalmanBoxTracker:
         I = np.eye(8, dtype=np.float32)
         self.P = (I - K @ self.H) @ self.P
     
-    def _state_to_bbox(self) -> BoundingBox:
-        """Convert Kalman state to bounding box with boundary clamping."""
+    def _state_to_bbox(self) -> tuple[BoundingBox, bool]:
+        """Convert Kalman state to a bounding box, and say whether it is real.
+
+        The second element is True when the state no longer describes anything
+        on screen, so the box returned with it is a fabrication assembled only
+        to satisfy BoundingBox's x2>x1 / y2>y1 validators. Two independent ways
+        that happens, both present in the tt7 run of 2026-08-25 (1920x1080):
+
+          - the predicted extent falls under one pixel and ``max(1.0, ...)``
+            below invents one. Track 12 at frame 116 came out
+            [1119, 1079, 1120, 1080] — 1px wide in the middle of the frame,
+            which no detector produces.
+          - the predicted box lies wholly past a frame edge, so both of its
+            coordinates clamp to the same number and the branches below shove
+            them a pixel apart. Track 2 at frame 57 came out [300, 0, 882, 1]
+            — and frame 57 is inside the window holding the video's one real
+            INSERT, which is why containment could not see it. Track 6 at
+            frame 199 came out [1919, 0, 1920, 1].
+
+        Both flags are read off the branch actually taken rather than measured
+        from the result, so this introduces no size threshold to tune.
+        """
         cx, cy, w, h = self.x[0], self.x[1], self.x[2], self.x[3]
-        
+
+        # A predicted extent below a pixel is not a small object; it is a size
+        # estimate that has collapsed. Recorded before the floor hides it.
+        size_collapsed = bool(w < 1.0 or h < 1.0)
+
         # Ensure positive width and height
         w = max(1.0, w)
         h = max(1.0, h)
-        
+
         x1 = cx - w / 2
         y1 = cy - h / 2
         x2 = cx + w / 2
         y2 = cy + h / 2
-        
+
+        left_frame = False
+
         # Clamp to frame boundaries if dimensions are available
         if self.frame_width is not None and self.frame_height is not None:
             # First clamp the coordinates
@@ -193,7 +219,14 @@ class KalmanBoxTracker:
             y1_clamped = max(0.0, min(y1, float(self.frame_height)))
             x2_clamped = max(0.0, min(x2, float(self.frame_width)))
             y2_clamped = max(0.0, min(y2, float(self.frame_height)))
-            
+
+            # Both coordinates of an axis landing on the same value means the
+            # box was entirely past that edge. Read here, before the branches
+            # below separate them again and erase the evidence.
+            left_frame = bool(
+                x2_clamped <= x1_clamped or y2_clamped <= y1_clamped
+            )
+
             # Ensure x2 > x1 and y2 > y1 after clamping
             # If box collapses to a line/point, adjust to maintain minimum size
             if x2_clamped <= x1_clamped:
@@ -208,7 +241,7 @@ class KalmanBoxTracker:
                 else:
                     # Maintain minimum width of 1 pixel
                     x2_clamped = x1_clamped + 1.0
-            
+
             if y2_clamped <= y1_clamped:
                 # If both hit bottom edge, shift y1 up
                 if y1_clamped >= float(self.frame_height) - 1.0:
@@ -221,14 +254,22 @@ class KalmanBoxTracker:
                 else:
                     # Maintain minimum height of 1 pixel
                     y2_clamped = y1_clamped + 1.0
-            
+
             x1, y1, x2, y2 = x1_clamped, y1_clamped, x2_clamped, y2_clamped
-        
-        return BoundingBox(x1=float(x1), y1=float(y1), x2=float(x2), y2=float(y2))
-    
+
+        box = BoundingBox(x1=float(x1), y1=float(y1), x2=float(x2), y2=float(y2))
+        return box, (size_collapsed or left_frame)
+
     def get_state(self) -> BoundingBox:
-        """Get current state as bounding box without prediction."""
-        return self._state_to_bbox()
+        """Get current state as bounding box without prediction.
+
+        Returns the box even when it is a fabrication. The one caller is IoU
+        association, where a collapsed box scores ~0 against every detection
+        and therefore matches nothing — which is the right answer for an object
+        that has left the frame, and is what already happened before the
+        fabrication was flagged.
+        """
+        return self._state_to_bbox()[0]
 
 
 class KalmanTrack:
@@ -273,16 +314,37 @@ class KalmanTrack:
             tracking_confidence=detection.confidence,
         ))
     
-    def predict(self, frame_index: int, timestamp_sec: float) -> TrackPoint:
-        """Predict track position for current frame."""
-        predicted_bbox = self.kf.predict()
-        
+    def predict(self, frame_index: int, timestamp_sec: float) -> TrackPoint | None:
+        """Predict track position for current frame.
+
+        Returns None when the Kalman state has stopped describing anything on
+        screen, in which case no point is recorded for this frame. Ageing still
+        happens either way, so the deletion budget in
+        ``KalmanSparseTracker.update`` behaves exactly as before — a track that
+        walks out of frame still dies after ``max_unmatched_frames``. The only
+        thing withheld is a fabricated observation.
+
+        Nothing real can be withheld here: detection-backed points are written
+        straight from ``detection.bbox`` in ``__init__`` and ``update()`` and
+        never pass through ``_state_to_bbox``, so a fabricated box is by
+        construction always a prediction.
+        """
+        predicted_bbox, is_fabricated = self.kf.predict()
+
         self.age += 1
         self.consecutive_misses += 1
         self.last_update_frame = frame_index
+
+        if is_fabricated:
+            # end_frame/end_sec deliberately stay where they were. Extending a
+            # track's span onto a frame it has no point for would contradict
+            # track_stitcher, which sets end_frame = points[-1].frame_index
+            # after every merge — the span ends at the last observation.
+            return None
+
         self.end_frame = frame_index
         self.end_sec = timestamp_sec
-        
+
         # Create predicted track point
         point = TrackPoint(
             frame_index=frame_index,
@@ -291,7 +353,7 @@ class KalmanTrack:
             detection_confidence=0.0,  # No detection
             tracking_confidence=max(0.0, 1.0 - self.consecutive_misses * 0.05),  # Decay confidence
         )
-        
+
         self.points.append(point)
         return point
     
@@ -426,21 +488,28 @@ class KalmanSparseTracker(ObjectTracker):
         
         # Step 1: Predict all existing tracks
         predicted_tracks = {}
+        # Track ids that actually received a provisional predicted point. Step 3
+        # replaces that point with the detection; a track whose prediction was
+        # withheld has nothing to replace, and popping there would delete its
+        # last real observation instead.
+        provisional: set[int] = set()
         for track_id, track in self.tracks.items():
-            track.predict(frame_index, timestamp_sec)
+            if track.predict(frame_index, timestamp_sec) is not None:
+                provisional.add(track_id)
             predicted_tracks[track_id] = track
-        
+
         # Step 2: Associate detections with tracks (if any detections)
         if filtered_detections:
             matched_tracks, unmatched_detections = self._associate(
                 predicted_tracks, filtered_detections
             )
-            
+
             # Step 3: Update matched tracks
             for track_id, detection in matched_tracks.items():
                 track = self.tracks[track_id]
                 # Remove the predicted point we just added
-                track.points.pop()
+                if track_id in provisional:
+                    track.points.pop()
                 # Add the updated point instead
                 track.update(detection, frame_index, timestamp_sec)
             
