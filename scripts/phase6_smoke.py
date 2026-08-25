@@ -1,13 +1,20 @@
-"""Smoke test for Phase 6 (Event Extraction / Normalization)."""
+"""Smoke test for Phase 6 (Event Extraction / Normalization).
+
+Exercises ActionNormalizer directly. It used to go through a thin
+s07_event_extraction stage, which was deleted: that stage emitted events with
+no actor_track_id, object_track_id or review_status, so it looked wireable while
+silently breaking graph_builder, state_inferencer, episode_assembler and
+s11_score. The pipeline's event stage is s07_events.
+"""
 
 import logging
 from pathlib import Path
 
 from src.config import load_config
 from src.context import PipelineContext
+from src.models.action_normalizer import ActionNormalizer
 from src.schema.event import ActionType
 from src.schema.vlm import RawVLMObservation, VLMSegmentStatus
-from src.stages import s07_event_extraction
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -103,10 +110,15 @@ def run_smoke_test():
         ),
     ]
 
-    # 2. Run event extraction
-    logger.info("Running s07_event_extraction...")
-    status = s07_event_extraction.run(ctx)
-    assert status.status == "OK"
+    # 2. Run the normalizer over every SUCCESS observation
+    logger.info("Running ActionNormalizer...")
+    normalizer = ActionNormalizer()
+    ctx.events = [
+        evt
+        for obs in ctx.vlm_observations
+        if obs.status == VLMSegmentStatus.SUCCESS
+        for evt in normalizer.normalize(obs)
+    ]
     
     # 3. Assertions
     events = ctx.events

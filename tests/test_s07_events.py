@@ -9,6 +9,7 @@ from src.schema.segment import CandidateSegment
 from src.schema.track import Track, TrackPoint
 from src.schema.vlm import RawVLMObservation, VLMSegmentStatus
 from src.stages.s07_events import (
+    _action_clauses,
     _map_raw_action_to_type,
     _match_action,
     _order_objects_by_action,
@@ -535,6 +536,151 @@ def test_object_is_the_thing_moved_not_the_container():
     assert len(events) == 1
     assert events[0].object_track_id == 44
     assert events[0].attributes["object_label"] == "push chopper"
+
+
+def test_one_observation_can_describe_two_actions():
+    """The frozen tt7 observation: the CLOSE used to be dropped on the floor.
+
+    tests/fixtures/tt7_vlm_observations.json is the real Gemini answer for
+    tt7.mp4 — "placing the push chopper into the cardboard box and closing the
+    lid". Matching the sentence as a unit returned the first stem that hit, so
+    the pipeline emitted one INSERT against seven hand labels and the CLOSE was
+    never emitted at all. These are labels 3 and 5 of
+    tests/fixtures/tt7_ground_truth.json.
+    """
+    actions = _action_clauses(
+        "placing the push chopper into the cardboard box and closing the lid",
+        ["push chopper", "cardboard box"],
+    )
+    assert [a for a, _ in actions] == [ActionType.INSERT, ActionType.CLOSE]
+    # The offsets must point at each clause's own verb in the original string.
+    text = "placing the push chopper into the cardboard box and closing the lid"
+    assert text[actions[0][1]:].startswith("placing")
+    assert text[actions[1][1]:].startswith("closing")
+
+
+def test_a_bare_coordinate_verb_is_not_its_own_action():
+    """"opening and unpacking a box" is one action described with two verbs.
+
+    Verbatim from tests/fixtures/tt6_vlm_observations.json. Splitting on " and "
+    made "opening" a clause of its own and emitted an OPEN *and* a REMOVE for
+    what the VLM described as one thing — inventing an event is worse than the
+    recall it buys. A verb with no complement shares the next clause's object,
+    so it is dropped and the sentence is matched whole, exactly as before.
+    """
+    actions = _action_clauses(
+        "opening and unpacking a cardboard box", ["cardboard box", "push chopper"]
+    )
+    assert [a for a, _ in actions] == [ActionType.OPEN]
+
+
+def test_a_single_action_observation_is_unchanged():
+    """Decomposition must not perturb the sentences that were already right."""
+    for text in (
+        "placing the push chopper inside the cardboard box",
+        "placing the push chopper back into the box",
+        "picking up the box",
+    ):
+        objects = ["push chopper", "cardboard box", "box"]
+        assert len(_action_clauses(text, objects)) == 1
+        assert _action_clauses(text, objects)[0][0] == _match_action(text, objects)[0]
+
+
+def test_each_event_takes_its_object_from_its_own_clause():
+    """Two actions in one sentence act on two different objects.
+
+    Verbatim from tests/fixtures/tt6_vlm_observations.json. Both events used to
+    resolve to the chopper: _mention_index finds a label's FIRST occurrence, so
+    the "box" of "places the box back down" was scored at the position of the
+    "cardboard box" in the earlier clause, and the locative penalty from "from
+    the cardboard box" was applied to a clause containing no locative.
+    """
+    config = PipelineConfig(stub_mode=False)
+    ctx = PipelineContext(
+        config=config, video_path=Path("test.mp4"), output_dir=Path("output")
+    )
+    ctx.candidate_segments = [
+        CandidateSegment(
+            segment_id="seg_001", track_ids=[1, 2, 3],
+            start_frame=0, end_frame=100, start_sec=0.0, end_sec=8.0,
+            trigger_reason="test", confidence=0.8, source="test", status="PENDING",
+        )
+    ]
+    ctx.tracks = [
+        _make_track(1, "person", n_points=40),
+        _make_track(2, "push chopper", n_points=20),
+        _make_track(3, "cardboard box", n_points=30),
+    ]
+    ctx.vlm_observations = [
+        RawVLMObservation(
+            observation_id="obs_001", segment_id="seg_001",
+            status=VLMSegmentStatus.SUCCESS, backend="GEMINI",
+            model_name="gemini-test", segment_start_sec=0.0, segment_end_sec=8.0,
+            actor="person", active_hand="RIGHT",
+            objects=["cardboard box", "push chopper"],
+            raw_action="the person removes the push chopper from the cardboard "
+                       "box and then places the box back down",
+            start_time_sec=1.0, end_time_sec=7.0,
+            state_change="chopper out of the box", visible_facts="hands on both",
+            inference="unpacking", uncertainty="none", confidence=0.9,
+        )
+    ]
+
+    events = _extract_events_from_vlm_observations(ctx)
+    assert [e.action for e in events] == [ActionType.REMOVE, ActionType.PLACE]
+    assert events[0].object_track_id == 2   # the chopper is removed
+    assert events[1].object_track_id == 3   # the box is put down
+    # Both keep the actor, which is a property of the observation, not a clause.
+    assert all(e.actor_track_id == 1 for e in events)
+    # The VLM's 1.0-7.0 describes the sentence, so it cannot be claimed by
+    # either action; the segment bounds are the honest answer.
+    assert all(e.start_sec == 0.0 and e.end_sec == 8.0 for e in events)
+    assert all(e.attributes["timing_precision"] == "SEGMENT" for e in events)
+
+
+def test_a_clause_naming_no_listed_object_is_left_unresolved():
+    """"closing the lid" acts on a part the VLM never listed as an object.
+
+    Borrowing the other clause's object would record that the person closed the
+    push chopper, which is a claim about the video that is not true. Unresolved
+    is honest, and downstream stages already handle a null object track.
+    """
+    config = PipelineConfig(stub_mode=False)
+    ctx = PipelineContext(
+        config=config, video_path=Path("test.mp4"), output_dir=Path("output")
+    )
+    ctx.candidate_segments = [
+        CandidateSegment(
+            segment_id="seg_001", track_ids=[1, 2, 3],
+            start_frame=0, end_frame=100, start_sec=0.0, end_sec=6.67,
+            trigger_reason="test", confidence=0.8, source="test", status="PENDING",
+        )
+    ]
+    ctx.tracks = [
+        _make_track(1, "person", n_points=40),
+        _make_track(2, "push chopper", n_points=20),
+        _make_track(3, "cardboard box", n_points=30),
+    ]
+    ctx.vlm_observations = [
+        RawVLMObservation(
+            observation_id="obs_001", segment_id="seg_001",
+            status=VLMSegmentStatus.SUCCESS, backend="GEMINI",
+            model_name="gemini-test", segment_start_sec=0.0, segment_end_sec=6.67,
+            actor="person", active_hand="BOTH",
+            objects=["push chopper", "cardboard box"],
+            raw_action="placing the push chopper into the cardboard box and "
+                       "closing the lid",
+            start_time_sec=0.0, end_time_sec=6.0,
+            state_change="chopper in the box", visible_facts="folds the flaps",
+            inference="packing", uncertainty="none", confidence=1.0,
+        )
+    ]
+
+    events = _extract_events_from_vlm_observations(ctx)
+    assert [e.action for e in events] == [ActionType.INSERT, ActionType.CLOSE]
+    assert events[0].object_track_id == 2
+    assert events[1].object_track_id is None
+    assert events[1].attributes["object_label"] is None
 
 
 if __name__ == "__main__":

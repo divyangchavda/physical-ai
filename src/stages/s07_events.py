@@ -103,6 +103,73 @@ def _clause_after(text: str, offset: int) -> str:
     return tail[:cut]
 
 
+# Built from _CLAUSE_BREAKS so the splitter and the preposition scoping above
+# cannot disagree about where one clause ends and the next begins.
+_CLAUSE_SPLIT = re.compile("|".join(re.escape(t) for t in _CLAUSE_BREAKS))
+
+
+def _clause_spans(text: str) -> list[tuple[int, str]]:
+    """``(offset, clause)`` for each clause of *text*.
+
+    Offsets are into *text*, because the action an object belongs to is decided
+    by distance from the verb — see :func:`_order_objects_by_action` — and a
+    clause-relative offset would rank every clause's objects against the first.
+    """
+    spans: list[tuple[int, str]] = []
+    pos = 0
+    for match in [*_CLAUSE_SPLIT.finditer(text), None]:
+        end = match.start() if match is not None else len(text)
+        piece = text[pos:end]
+        if piece.strip():
+            spans.append((pos + len(piece) - len(piece.lstrip()), piece.strip()))
+        pos = match.end() if match is not None else len(text)
+    return spans
+
+
+def _action_clauses(
+    action_lower: str, objects: list[str] | None
+) -> list[tuple[ActionType, int | None]]:
+    """Every distinct action the text describes, as ``(action, verb offset)``.
+
+    One observation is one VLM call over one clip, and the VLM answers about the
+    whole clip. "placing the push chopper into the cardboard box and closing the
+    lid" is two actions; matching the sentence as a unit returns the first stem
+    that hits and the CLOSE was never emitted at all. On the frozen tt7
+    observation that is the difference between one event and two, against seven
+    hand labels.
+
+    Two rules keep the split from inventing actions:
+
+    - A clause that is nothing but its own verb is not an independent action.
+      "opening and unpacking a cardboard box" coordinates two verbs over one
+      shared object; splitting it emitted an OPEN *and* a REMOVE for what the
+      VLM described as one thing. A verb with no complement of its own belongs
+      to the following clause, so it is dropped and the sentence is matched
+      whole. (Limited to a one-word clause: "opening it" would still split.)
+    - If fewer than two independent actions survive, the whole sentence is
+      matched as before. So a single-action observation, or one whose clauses
+      are all unreadable, behaves exactly as it did.
+    """
+    spans = _clause_spans(action_lower)
+    found: list[tuple[ActionType, int | None]] = []
+    for offset, clause in spans:
+        action, rel = _match_action(clause, objects)
+        if action is ActionType.UNKNOWN or rel is None:
+            continue
+        # Bare coordinate verb: the clause is the verb and nothing else.
+        if len(clause.split()) == 1:
+            continue
+        absolute = offset + rel
+        # Collapse a verb repeated across adjacent clauses ("lifting and raising").
+        if found and found[-1][0] is action:
+            continue
+        found.append((action, absolute))
+
+    if len(found) > 1:
+        return found
+    return [_match_action(action_lower, objects)]
+
+
 def _promote_by_preposition(
     action: ActionType, text: str, offset: int | None
 ) -> ActionType:
@@ -325,6 +392,15 @@ def _order_objects_by_action(
     return [label for _, label in mentioned] + unmentioned
 
 
+def _names_an_object(clause: str, vlm_objects: list[str] | None) -> bool:
+    """True when *clause* mentions any of the observation's objects."""
+    if not vlm_objects:
+        return False
+    return any(
+        _mention_index(label, clause) is not None for label in vlm_objects
+    )
+
+
 def _resolve_object_track(
     vlm_objects: list[str] | None,
     segment_tracks: list,
@@ -398,49 +474,104 @@ def _extract_events_from_vlm_observations(ctx: PipelineContext) -> list[Physical
         # Map raw_action to ActionType. The object names are blanked out first —
         # "push chopper" carries a verb in its name — and the verb's offset then
         # decides which clause of a compound action owns the object.
-        action_type, verb_index = _match_action(
-            (obs.raw_action or "").lower(), obs.objects
-        )
-        object_track_id, object_label = _resolve_object_track(
-            obs.objects, segment_tracks, person_classes, background_classes,
-            raw_action=obs.raw_action, verb_index=verb_index,
-        )
+        clauses = _action_clauses((obs.raw_action or "").lower(), obs.objects)
 
-        timing_precision = _timing_precision(obs)
+        # The VLM's own offsets describe the sentence. When the sentence held
+        # several actions they cannot be attributed to one of them, so the
+        # segment bounds are the honest answer and the precision says so.
+        multi = len(clauses) > 1
+        if multi:
+            start_sec, end_sec = obs.segment_start_sec, obs.segment_end_sec
+            timing_precision = "SEGMENT"
+        else:
+            start_sec = (
+                obs.start_time_sec if obs.start_time_sec is not None
+                else obs.segment_start_sec
+            )
+            end_sec = (
+                obs.end_time_sec if obs.end_time_sec is not None
+                else obs.segment_end_sec
+            )
+            timing_precision = _timing_precision(obs)
 
-        # Create PhysicalEvent
-        event = PhysicalEvent(
-            event_id=f"evt_{uuid.uuid4().hex[:8]}",
-            segment_id=obs.segment_id,
-            observation_id=obs.observation_id,
-            action=action_type,
-            confidence=obs.confidence if obs.confidence is not None else 0.0,
-            source=f"vlm:{obs.backend.lower()}",
-            is_estimated=True,
-            actor_track_id=actor_track_id,
-            object_track_id=object_track_id,
-            start_sec=obs.start_time_sec if obs.start_time_sec is not None else obs.segment_start_sec,
-            end_sec=obs.end_time_sec if obs.end_time_sec is not None else obs.segment_end_sec,
-            attributes={
-                "raw_action": obs.raw_action,
-                "actor": obs.actor,
-                "active_hand": obs.active_hand,
-                "objects": obs.objects,
-                "object_label": object_label,
-                "state_change": obs.state_change,
-                "visible_facts": obs.visible_facts,
-                "inference": obs.inference,
-                "uncertainty": obs.uncertainty,
-                "model_name": obs.model_name,
-                "timing_precision": timing_precision,
-            },
-            review_status="PENDING"
-        )
-        events.append(event)
+        for action_type, verb_index in clauses:
+            clause_text = (
+                _clause_after((obs.raw_action or "").lower(), verb_index)
+                if verb_index is not None else None
+            )
 
-        logger.debug("[%s] Created event %s: action=%s, confidence=%.2f, time=[%.1f, %.1f]s",
-                    STAGE, event.event_id, event.action, event.confidence,
-                    event.start_sec, event.end_sec)
+            # Resolved per clause, not per observation. "removes the push
+            # chopper from the cardboard box and then places the box back down"
+            # acts on two different objects, and resolving against the whole
+            # sentence gave both events the chopper: _mention_index finds a
+            # label's FIRST occurrence, so the "box" of the second clause was
+            # scored at the position of the first, and the chopper's locative
+            # penalty from "from the cardboard box" was applied to a clause that
+            # has no locative at all.
+            #
+            # Only done when the observation really produced several events. For
+            # a single event the clause IS the sentence, and scoping a
+            # coordinate verb like "opening" to its own one-word clause would
+            # lose the object it shares with the rest of the sentence.
+            if multi and clause_text is not None:
+                if _names_an_object(clause_text, obs.objects):
+                    object_track_id, object_label = _resolve_object_track(
+                        obs.objects, segment_tracks, person_classes,
+                        background_classes, raw_action=clause_text, verb_index=0,
+                    )
+                else:
+                    # "closing the lid" names a part the VLM never listed as an
+                    # object. Borrowing another clause's object would attribute
+                    # the close to the chopper, which is a fact about the video
+                    # that is not true; unresolved is the honest answer.
+                    object_track_id, object_label = None, None
+            else:
+                object_track_id, object_label = _resolve_object_track(
+                    obs.objects, segment_tracks, person_classes,
+                    background_classes,
+                    raw_action=obs.raw_action, verb_index=verb_index,
+                )
+
+            # Create PhysicalEvent
+            event = PhysicalEvent(
+                event_id=f"evt_{uuid.uuid4().hex[:8]}",
+                segment_id=obs.segment_id,
+                observation_id=obs.observation_id,
+                action=action_type,
+                confidence=obs.confidence if obs.confidence is not None else 0.0,
+                source=f"vlm:{obs.backend.lower()}",
+                is_estimated=True,
+                actor_track_id=actor_track_id,
+                object_track_id=object_track_id,
+                start_sec=start_sec,
+                end_sec=end_sec,
+                attributes={
+                    "raw_action": obs.raw_action,
+                    "actor": obs.actor,
+                    "active_hand": obs.active_hand,
+                    "objects": obs.objects,
+                    "object_label": object_label,
+                    "state_change": obs.state_change,
+                    "visible_facts": obs.visible_facts,
+                    "inference": obs.inference,
+                    "uncertainty": obs.uncertainty,
+                    "model_name": obs.model_name,
+                    "timing_precision": timing_precision,
+                    # Which clause of raw_action produced this event. With one
+                    # observation now yielding several, there is otherwise no
+                    # way to tell them apart in events.json.
+                    "action_clause": (
+                        _clause_after((obs.raw_action or "").lower(), verb_index)
+                        if verb_index is not None else None
+                    ),
+                },
+                review_status="PENDING"
+            )
+            events.append(event)
+
+            logger.debug("[%s] Created event %s: action=%s, confidence=%.2f, time=[%.1f, %.1f]s",
+                        STAGE, event.event_id, event.action, event.confidence,
+                        event.start_sec, event.end_sec)
 
     return events
 

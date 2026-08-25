@@ -1,5 +1,20 @@
 """Deterministic normalization of VLM observations into PhysicalEvents.
 
+NOT the pipeline's event stage. ``src/stages/s07_events.py`` is, and it should
+stay that way until a measurement says otherwise:
+
+- It resolves ``actor_track_id``, ``object_track_id`` and ``object_label``, which
+  graph_builder, state_inferencer and episode_assembler all read, and sets
+  ``review_status`` for s11_score. This module sets none of them.
+- On the five real Gemini observations in ``tests/fixtures`` its verb rules score
+  4/5 against s07_events' 5/5. On "the person removes the push chopper from the
+  cardboard box and then places the box back down" it returns PUSH + PLACE,
+  reading PUSH out of the object's name and losing the REMOVE entirely, because
+  it has no equivalent of ``_strip_object_phrases``.
+
+What it has that s07_events does not is evidence corroboration: it refuses an
+action the visible facts do not support. That is why it is kept.
+
 Why the verb patterns are generated rather than written out
 -----------------------------------------------------------
 This module used to match bare lemmas: ``\\b(put|set|place|drop)``. Gemini writes
@@ -7,7 +22,8 @@ gerunds, and a lemma ending in a silent ``e`` loses it before ``-ing`` — so
 "placing" does not contain "place", "closing" does not contain "close", and
 "moving" does not contain "move". The rules were therefore blind to the exact
 tense the VLM naturally produces, silently and only for e-stem verbs ("lifting"
-matched fine, which is why the failure was not obvious).
+matched fine, which is why the failure was not obvious). s07_events never had
+this bug: its table matches truncated stems ("plac", "clos", "mov").
 
 Measured on the one real observation the project has, "placing the push chopper
 into the cardboard box and closing the lid" decomposed to PUSH + UNKNOWN: the

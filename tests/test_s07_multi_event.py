@@ -1,15 +1,23 @@
-"""Tests for Stage 07 Multi-Event Normalization logic."""
+"""Tests for ActionNormalizer's decomposition of one observation into N events.
 
-from pathlib import Path
+ActionNormalizer is NOT the pipeline's event stage — s07_events is. It reached a
+thin s07_event_extraction stage that has since been deleted, because that stage
+emitted events with no actor_track_id, object_track_id or review_status and so
+silently broke graph_builder, state_inferencer, episode_assembler and s11_score.
+Measured on the five real Gemini observations in tests/fixtures, this
+normalizer's verb rules are also the weaker of the two: 4/5 against 5/5, reading
+PUSH out of the object name "push chopper" on the compound sentence.
 
-import pytest
+Kept and tested because its evidence-corroboration rules — refuse an action the
+visible facts do not support — are the part s07_events does not have, and are
+what "pretending to" and "failing to" in Something-Something V2 will need.
+"""
 
-from src.config import EventExtractionConfig, PipelineConfig
-from src.context import PipelineContext
 from src.models.action_normalizer import ActionNormalizer
 from src.schema.event import ActionType
 from src.schema.vlm import RawVLMObservation, VLMSegmentStatus
-from src.stages.s07_event_extraction import run as run_s07
+
+import pytest
 
 
 @pytest.fixture
@@ -111,20 +119,26 @@ def test_5_temporal_limitation_segment_bounds(normalizer):
     assert events[1].attributes["timing_precision"] == "SEGMENT"
 
 
-def test_6_failed_observation():
+def test_6_failed_observation(normalizer):
+    """A non-SUCCESS observation is the caller's to filter, not the normalizer's.
+
+    This and test_7 used to run the deleted s07_event_extraction stage to check
+    that FAILED and SKIPPED observations yield no events. The pipeline's own
+    stage is covered by
+    tests/test_s07_events.py::test_extract_events_skips_failed_observations; what
+    is left to pin here is that a null raw_action does not raise.
+    """
     obs = _obs(None, status=VLMSegmentStatus.FAILED)
-    ctx = PipelineContext(config=PipelineConfig(output_dir=Path("output"), event_extraction=EventExtractionConfig(enabled=True)), video_path=Path("vid.mp4"), output_dir=Path("output"))
-    ctx.vlm_observations = [obs]
-    run_s07(ctx)
-    assert len(ctx.events) == 0
+    assert obs.status != VLMSegmentStatus.SUCCESS
+    events = normalizer.normalize(obs)
+    assert [e.action for e in events] == [ActionType.UNKNOWN]
 
 
-def test_7_skipped_observation():
+def test_7_skipped_observation(normalizer):
     obs = _obs(None, status=VLMSegmentStatus.SKIPPED)
-    ctx = PipelineContext(config=PipelineConfig(output_dir=Path("output"), event_extraction=EventExtractionConfig(enabled=True)), video_path=Path("vid.mp4"), output_dir=Path("output"))
-    ctx.vlm_observations = [obs]
-    run_s07(ctx)
-    assert len(ctx.events) == 0
+    assert obs.status != VLMSegmentStatus.SUCCESS
+    events = normalizer.normalize(obs)
+    assert [e.action for e in events] == [ActionType.UNKNOWN]
 
 
 def test_8_success_unknown_action(normalizer):
