@@ -107,12 +107,19 @@ def test_multi_action_decomposition(normalizer):
     assert events[1].action == ActionType.PLACE
 
 
-def test_multi_action_ambiguous_fallback(normalizer):
-    # If one of the parts fails to map securely, the whole observation falls back to UNKNOWN
+def test_multi_action_keeps_the_part_that_maps(normalizer):
+    """An unmappable clause is dropped, not promoted to a veto.
+
+    "wiggled it" has no ActionType, so nothing is emitted for it. "picked up
+    cup" plus "lifted cup" is an unambiguous PICK and is emitted. This asserted
+    1 UNKNOWN while the normalizer required every clause to map; that rule made
+    a single unrecognised verb -- of which there are many, the vocabulary being
+    finite -- erase everything read correctly alongside it.
+    """
     obs = _obs("picked up cup and wiggled it", facts="lifted cup and shook it")
     events = normalizer.normalize(obs)
     assert len(events) == 1
-    assert events[0].action == ActionType.UNKNOWN
+    assert events[0].action == ActionType.PICK
 
 
 def test_null_raw_action(normalizer):

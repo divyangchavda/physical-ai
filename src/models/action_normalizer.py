@@ -1,4 +1,25 @@
-"""Deterministic normalization of VLM observations into PhysicalEvents."""
+"""Deterministic normalization of VLM observations into PhysicalEvents.
+
+Why the verb patterns are generated rather than written out
+-----------------------------------------------------------
+This module used to match bare lemmas: ``\\b(put|set|place|drop)``. Gemini writes
+gerunds, and a lemma ending in a silent ``e`` loses it before ``-ing`` — so
+"placing" does not contain "place", "closing" does not contain "close", and
+"moving" does not contain "move". The rules were therefore blind to the exact
+tense the VLM naturally produces, silently and only for e-stem verbs ("lifting"
+matched fine, which is why the failure was not obvious).
+
+Measured on the one real observation the project has, "placing the push chopper
+into the cardboard box and closing the lid" decomposed to PUSH + UNKNOWN: the
+PLACE rule missed "placing", so the sentence fell through to PUSH on the word
+"push" *in the object's name*, and "closing" missed CLOSE entirely. Because any
+UNKNOWN clause discarded the whole observation, the result was a single UNKNOWN
+event.
+
+So verb forms come from :func:`_inflect`, and ``tests/test_action_inflection.py``
+pins a word list of the forms that must match. Adding a verb means adding a
+lemma, not hand-writing four spellings and forgetting one.
+"""
 
 import re
 import uuid
@@ -7,51 +28,129 @@ from src.schema.event import ActionType, PhysicalEvent
 from src.schema.vlm import RawVLMObservation
 
 
+def _inflect(lemma: str) -> str:
+    """Regex fragment matching *lemma* in the tenses a VLM actually writes.
+
+    Covers the base form, third person, past and gerund. Multi-word lemmas
+    ("let go") are matched verbatim, since they inflect on the first word and
+    are few enough to list explicitly.
+    """
+    if " " in lemma:
+        return re.escape(lemma)
+    if lemma.endswith("e"):
+        # place -> place places placed placing. The silent e is dropped before
+        # -ing, which is the whole reason this function exists.
+        return rf"{lemma[:-1]}(?:e|es|ed|ing)"
+    if lemma.endswith("y") and len(lemma) > 2 and lemma[-2] not in "aeiou":
+        # carry -> carry carries carried carrying
+        return rf"{lemma[:-1]}(?:y|ies|ied|ying)"
+    # Consonant doubling (drop -> dropped) is not predictable from spelling
+    # alone, so both spellings are offered. Generating a form English never
+    # uses is harmless — it simply never matches — while missing a real form is
+    # the defect this replaces.
+    return rf"{lemma}(?:s|es|ed|ing|{lemma[-1]}ed|{lemma[-1]}ing)?"
+
+
+def _verbs(*lemmas: str) -> re.Pattern[str]:
+    """Compile an alternation over the inflected forms of *lemmas*."""
+    return re.compile(r"\b(?:" + "|".join(_inflect(w) for w in lemmas) + r")\b")
+
+
+# Verb groups, as lemmas. _inflect expands each one.
+_PICK = _verbs("pick", "lift", "raise")
+_GRASP = _verbs("grasp", "grab", "hold", "take hold", "took hold")
+_PLACE = _verbs("put", "set", "place", "drop", "lay")
+_OPEN = _verbs("open")
+_CLOSE = _verbs("close", "shut", "seal")
+_MOVE = _verbs("move", "slide", "carry", "shift")
+_PUSH = _verbs("push", "shove")
+_PULL = _verbs("pull", "drag")
+_TOUCH = _verbs("touch", "tap")
+_INSPECT = _verbs("look", "inspect", "examine")
+_RELEASE = _verbs("release", "let go", "lets go", "letting go", "let it go")
+# Deliberately narrow. There is no ground truth for tool use yet, so this fires
+# only on explicit tool verbs rather than guessing from context.
+_USE_TOOL = _verbs("use", "cut", "chop", "slice", "stir", "hammer", "screw",
+                   "wipe", "scrub")
+
+# INSERT and REMOVE are a placement or retrieval verb *plus* a preposition. The
+# preposition carries the direction, which is the information the pipeline
+# exists to produce, so it is matched separately and checked first.
+_INSERT_V = _verbs("put", "place", "insert", "drop", "stuff", "plug", "slide",
+                   "push", "load", "pack", "lower")
+_REMOVE_V = _verbs("take", "pull", "remove", "lift", "pick", "dig", "extract",
+                   "unload", "fish")
+_INTO = re.compile(r"\b(into|inside|in to)\b")
+_OUT_OF = re.compile(r"\b(out of|out from|from inside|from within)\b")
+
+# Clauses the VLM marks as not actually happening. Something-Something V2 has
+# these as their own classes ("Pretending to put something into something",
+# "Failing to put something into something because something does not fit"), so
+# treating them as real INSERTs would score as confidently wrong.
+_NEGATED = re.compile(r"\b(did not|does not fit|didn't|failed to|fails to|"
+                      r"pretend|pretends|pretending|without)\b")
+
+# Split on ", and ", ", then ", " and ", " then ", or a bare comma.
+_SPLIT = re.compile(r",\s+(?:and\s+|then\s+)?|\s+and\s+|\s+then\s+")
+
+
 class ActionNormalizer:
     """Deterministically normalizes raw VLM observations into PhysicalEvent objects."""
 
     def normalize(self, obs: RawVLMObservation) -> list[PhysicalEvent]:
         """Convert a single RawVLMObservation into one or more PhysicalEvents."""
-        
+
         # 1. Handle missing / explicitly unknown raw action
         if not obs.raw_action or obs.raw_action.strip().upper() == "UNKNOWN":
             return [self._build_event(obs, ActionType.UNKNOWN)]
-            
+
         raw = obs.raw_action.lower()
         facts = (obs.visible_facts or "").lower()
         state = (obs.state_change or "").lower()
         inf = (obs.inference or "").lower()
         unc = (obs.uncertainty or "").lower()
-        
+
         # Combine all evidence for general conflict checking
         all_evidence = f"{facts} {inf} {unc}"
-        
-        # 2. Check for multiple events (simplistic decomposition)
-        # Split on ", and ", ", then ", " and ", " then ", or just ","
-        if re.search(r'\b(and|then)\b', raw) or ',' in raw:
-            splits = re.split(r',\s+(?:and\s+|then\s+)?|\s+and\s+|\s+then\s+', raw)
-            splits = [s.strip() for s in splits if s.strip()]
-            
+
+        # 2. Decompose a sentence that describes more than one action.
+        if re.search(r"\b(and|then)\b", raw) or "," in raw:
+            splits = [s.strip() for s in _SPLIT.split(raw) if s.strip()]
+
             if len(splits) > 1:
-                actions = []
-                for split in splits:
-                    act = self._evaluate_single_action(split, facts, state, inf, unc, all_evidence)
-                    actions.append(act)
-                
-                # If we successfully parsed ALL splits into non-UNKNOWN canonical actions
-                if all(a != ActionType.UNKNOWN for a in actions):
-                    # Deduplicate consecutive identical actions (e.g., "picked up and lifted")
-                    unique_actions = []
-                    for a in actions:
-                        if not unique_actions or unique_actions[-1] != a:
-                            unique_actions.append(a)
-                    
-                    if len(unique_actions) > 1:
-                        return [self._build_event(obs, act, segment_timing=True) for act in unique_actions]
-            
-            # If decomposition failed or wasn't clean, fallback to UNKNOWN for the whole observation.
-            return [self._build_event(obs, ActionType.UNKNOWN)]
-            
+                actions = [
+                    self._evaluate_single_action(s, facts, state, inf, unc, all_evidence)
+                    for s in splits
+                ]
+                # Keep the clauses that parsed and discard the ones that did not.
+                # The previous code required *every* clause to parse and returned
+                # a single UNKNOWN otherwise, so one unreadable clause deleted the
+                # readable ones -- a confidently derived PICK was thrown away on
+                # the strength of an unrelated "wiggled it". Dropping a clause
+                # loses recall; letting it veto the sentence loses more.
+                known: list[ActionType] = []
+                for act in actions:
+                    if act is ActionType.UNKNOWN:
+                        continue
+                    # Collapse consecutive repeats ("picked up and lifted").
+                    if not known or known[-1] != act:
+                        known.append(act)
+
+                if known:
+                    # Only a genuine decomposition forfeits the VLM's own
+                    # timestamps: those describe the whole sentence, so they
+                    # cannot be attributed to one clause of several. A single
+                    # surviving clause is treated like the single-action path.
+                    multi = len(known) > 1
+                    return [
+                        self._build_event(obs, act, segment_timing=multi)
+                        for act in known
+                    ]
+
+            # No clause parsed. The sentence may still read as one action when
+            # taken whole ("moved it up and to the left"), so fall through to the
+            # single-action path rather than returning UNKNOWN unexamined.
+
         # 3. Single event evaluation
         action_type = self._evaluate_single_action(raw, facts, state, inf, unc, all_evidence)
         return [self._build_event(obs, action_type)]
@@ -60,13 +159,31 @@ class ActionNormalizer:
         self, raw: str, facts: str, state: str, inf: str, unc: str, all_evidence: str
     ) -> ActionType:
         """Evaluate a single action string against the evidence."""
-        
+
         # Check for uncertainty override
         if "cannot see" in unc or "occluded" in unc or "unclear" in unc:
             return ActionType.UNKNOWN
-            
+
+        # INSERT / REMOVE are tested first. They are ordinary placement and
+        # retrieval verbs distinguished only by a preposition, so PLACE or PICK
+        # below would claim them and the direction would be lost -- "placing the
+        # chopper into the box" is an INSERT, not a PLACE that happens to
+        # mention a box.
+        if _INTO.search(raw) and _INSERT_V.search(raw):
+            if _NEGATED.search(raw) or _NEGATED.search(all_evidence):
+                return ActionType.UNKNOWN
+            return ActionType.INSERT
+
+        if _OUT_OF.search(raw) and _REMOVE_V.search(raw):
+            if _NEGATED.search(raw) or _NEGATED.search(all_evidence):
+                return ActionType.UNKNOWN
+            return ActionType.REMOVE
+
+        if _RELEASE.search(raw):
+            return ActionType.RELEASE
+
         # PICK & GRASP logic
-        if re.search(r'\b(pick|lift|raise)', raw):
+        if _PICK.search(raw):
             # PICK requires explicit upward movement evidence
             if re.search(r'\b(lift|up|upward|rise|raise)', all_evidence):
                 # Check for contradiction
@@ -77,7 +194,7 @@ class ActionNormalizer:
                 # "picked up cup" + no lifting evidence -> UNKNOWN
                 return ActionType.UNKNOWN
 
-        if re.search(r'\b(grasp|grab|hold|take hold|took hold)', raw):
+        if _GRASP.search(raw):
             # Contradiction check
             if re.search(r'\b(did not grasp|no hold|dropped)', all_evidence):
                 return ActionType.UNKNOWN
@@ -87,28 +204,28 @@ class ActionNormalizer:
             return ActionType.GRASP
 
         # PLACE
-        if re.search(r'\b(put|set|place|drop)', raw):
+        if _PLACE.search(raw):
             if re.search(r'\b(did not put|kept holding|no placement)', all_evidence):
                 return ActionType.UNKNOWN
             return ActionType.PLACE
 
         # OPEN & CLOSE
-        if re.search(r'\b(open)', raw):
+        if _OPEN.search(raw):
             if "already open" in state or "already open" in facts:
                 return ActionType.UNKNOWN
             return ActionType.OPEN
-            
-        if re.search(r'\b(close|shut)', raw):
+
+        if _CLOSE.search(raw):
             if "already closed" in state or "already closed" in facts:
                 return ActionType.UNKNOWN
             return ActionType.CLOSE
-            
+
         # State-only fallback check: "door is open" without action transition
         if " is open" in raw or " is closed" in raw:
             return ActionType.UNKNOWN
 
         # MOVE
-        if re.search(r'\b(move|slide|carry)', raw):
+        if _MOVE.search(raw):
             # Must confirm the object moved, not just the hand
             if "object was moved" in all_evidence or "moved the object" in all_evidence or "object moves" in all_evidence:
                 return ActionType.MOVE
@@ -116,17 +233,20 @@ class ActionNormalizer:
             if "moved hand" in raw and not re.search(r'\b(object|it)\b', all_evidence):
                 return ActionType.UNKNOWN
             return ActionType.UNKNOWN # require strict evidence for MOVE
-            
+
         # PUSH / PULL
-        if re.search(r'\b(push|shove)', raw):
+        if _PUSH.search(raw):
             return ActionType.PUSH
-        if re.search(r'\b(pull|drag)', raw):
+        if _PULL.search(raw):
             return ActionType.PULL
-            
+
+        if _USE_TOOL.search(raw):
+            return ActionType.USE_TOOL
+
         # TOUCH / INSPECT
-        if re.search(r'\b(touch|tap)', raw):
+        if _TOUCH.search(raw):
             return ActionType.TOUCH
-        if re.search(r'\b(look|inspect|examine)', raw):
+        if _INSPECT.search(raw):
             if "inspect" in all_evidence or "examine" in all_evidence or "look closely" in all_evidence:
                 return ActionType.INSPECT
             return ActionType.UNKNOWN
@@ -140,12 +260,12 @@ class ActionNormalizer:
         timing_precision = "EXACT"
         start_sec = obs.start_time_sec
         end_sec = obs.end_time_sec
-        
+
         if start_sec is None or end_sec is None or segment_timing:
             start_sec = obs.segment_start_sec
             end_sec = obs.segment_end_sec
             timing_precision = "SEGMENT"
-            
+
         # Extract attributes for provenance
         attributes = {
             "vlm_raw_action": obs.raw_action,
@@ -153,7 +273,7 @@ class ActionNormalizer:
             "vlm_uncertainty": obs.uncertainty,
             "timing_precision": timing_precision
         }
-        
+
         return PhysicalEvent(
             event_id=f"evt_{uuid.uuid4().hex[:8]}",
             segment_id=obs.segment_id,

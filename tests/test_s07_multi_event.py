@@ -50,32 +50,50 @@ def test_1_clearly_separable(normalizer):
     assert events[1].action == ActionType.PLACE
 
 
-def test_2_ambiguous_cannot_reliably_decompose(normalizer):
+def test_2_an_unreadable_clause_does_not_delete_a_readable_one(normalizer):
+    """"picked up the phone" -> PICK; "moved it" -> UNKNOWN, since MOVE demands
+    explicit evidence the object moved and the facts do not give it.
+
+    This used to assert 1 UNKNOWN: any UNKNOWN clause discarded the whole
+    sentence. That rule cost more than it saved -- on the one real observation
+    the project has it turned a good INSERT into nothing -- so a clause that
+    fails to parse is now dropped and the rest is kept. PICK was derived from
+    "lifted phone" and is not made wrong by MOVE being unclear.
+    """
     obs = _obs("picked up the phone and moved it", facts="lifted phone but no distinct placement")
     events = normalizer.normalize(obs)
-    # The normalizer attempts to parse "picked up the phone" -> PICK, "moved it" -> MOVE.
-    # However, "moved it" doesn't have "object was moved" evidence in facts, so it might return UNKNOWN for split 2.
-    # If one part is UNKNOWN, the entire decomposition fails and falls back to 1 UNKNOWN event.
     assert len(events) == 1
-    assert events[0].action == ActionType.UNKNOWN
+    assert events[0].action == ActionType.PICK
+    # One surviving clause keeps the VLM's own timestamps. Those bounds are only
+    # forfeited when several actions share them and none can claim them.
+    assert events[0].attributes["timing_precision"] == "EXACT"
 
 
 def test_3_three_actions(normalizer):
+    """Three clauses, two of which parse.
+
+    Previously this asserted 1 UNKNOWN because the splitter accepted exactly two
+    pieces. It now splits on every separator and returns what it could read:
+    PICK ("lifted object") and PLACE ("set it down"). The middle clause,
+    "carried it", is dropped -- MOVE needs the object's movement stated, and
+    "moved it" in the facts is not attributed to an object.
+    """
     obs = _obs("picked up the phone, carried it, and placed it on the table", facts="lifted object, moved it, set it down")
     events = normalizer.normalize(obs)
-    # The regex split might yield 2 or 3 pieces. Currently it only accepts exactly 2 splits.
-    # So it should conservatively fall back to 1 UNKNOWN event.
-    assert len(events) == 1
-    assert events[0].action == ActionType.UNKNOWN
+    assert [e.action for e in events] == [ActionType.PICK, ActionType.PLACE]
 
 
 def test_4_conflicting_evidence_in_part(normalizer):
+    """Evidence contradicting one clause must not discredit the other.
+
+    "kept holding it" refutes PLACE, and PLACE is correctly dropped. It says
+    nothing about the lift, which "lifted cup" states outright, so PICK stands.
+    The old assertion of 1 UNKNOWN threw away the half the evidence supported.
+    """
     obs = _obs("picked up the cup and placed it", facts="lifted cup but kept holding it")
     events = normalizer.normalize(obs)
-    # "placed it" but evidence says "kept holding it" (no placement).
-    # This contradicts PLACE -> UNKNOWN for the second part -> whole thing collapses to 1 UNKNOWN event.
     assert len(events) == 1
-    assert events[0].action == ActionType.UNKNOWN
+    assert events[0].action == ActionType.PICK
 
 
 def test_5_temporal_limitation_segment_bounds(normalizer):
