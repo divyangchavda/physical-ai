@@ -56,7 +56,7 @@ def test_vlm_success_provenance_and_preservation(mock_ctx):
     # Check provenance
     assert obs.backend == "LOCAL_MODEL"
     assert obs.model_name == "stub_local"
-    assert obs.prompt_version == "v1"
+    assert obs.prompt_version == s06_vlm.PROMPT_VERSION
     assert obs.segment_start_sec == 42.0
     assert obs.segment_end_sec == 47.0
     

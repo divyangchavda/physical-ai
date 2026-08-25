@@ -22,8 +22,17 @@ from src.schema.vlm import RawVLMObservation, VLMSegmentStatus
 logger = get_logger(__name__)
 STAGE = "s06_vlm"
 
-PROMPT = """You are a physical interaction analyst. Review the provided sequence of video frames representing a short temporal segment.
-Identify the physical interaction occurring, if any. 
+# Substituted per segment by _render_prompt. A sentinel rather than a format
+# field because the schema block below is full of literal braces.
+_DURATION_TOKEN = "{{CLIP_DURATION}}"
+
+# Bumped from "v1" when the clip duration was added. Two runs whose observations
+# came from different prompts are not comparable, and prompt_version is the only
+# field in vlm_observations.json that can tell them apart.
+PROMPT_VERSION = "v2"
+
+PROMPT = """You are a physical interaction analyst. Review the provided sequence of video frames, which is a single clip {{CLIP_DURATION}} seconds long.
+Identify the physical interaction occurring, if any.
 Answer in JSON format ONLY. Do not include markdown formatting, preambles, or explanations.
 
 Schema:
@@ -32,8 +41,8 @@ Schema:
   "active_hand": "LEFT, RIGHT, BOTH, or 'UNKNOWN'",
   "objects": ["list of primary objects manipulated"],
   "raw_action": "short description of the physical action (e.g., 'picked up the cup')",
-  "start_time_sec": <float offset from segment start, or null>,
-  "end_time_sec": <float offset from segment start, or null>,
+  "start_time_sec": <float offset from the clip start, between 0.0 and {{CLIP_DURATION}}, or null>,
+  "end_time_sec": <float offset from the clip start, between 0.0 and {{CLIP_DURATION}}, or null>,
   "state_change": "description of object state change (e.g., 'box is open'), or 'UNKNOWN'",
   "visible_facts": "only things directly observable in the frames (e.g., 'hand contacts cup')",
   "inference": "your reasoned interpretation beyond what is directly visible (e.g., 'likely picking up')",
@@ -45,7 +54,29 @@ Rules:
 1. Do not invent information. Use 'UNKNOWN' or null if evidence is insufficient.
 2. Distinguish visible facts from inference. visible_facts = what you directly see. inference = what you conclude.
 3. Do not identify objects that cannot be visually supported.
+4. This clip is {{CLIP_DURATION}} seconds long and nothing outside it is visible to you.
+   start_time_sec and end_time_sec are offsets within this clip, not timestamps in a
+   longer video, so neither may exceed {{CLIP_DURATION}}. Report null rather than a
+   guess if you cannot place the action within the clip.
 """
+
+
+def _render_prompt(duration_sec: float) -> str:
+    """Fill in the clip length the model is being asked to time against.
+
+    The prompt used to ask for a "float offset from segment start" and never say
+    what the segment's length was. Measured across twelve tt7 segments at
+    max_segment_duration_sec=1.0, gemini-3.1-flash-lite answered with a relative
+    end_time_sec of *exactly 2.0* every single time — on clips 0.95s long. It was
+    not localising the action; 2.0 is what the field defaults to when the bound
+    is unstated.
+
+    Five of those were then discarded outright (see _absolute_timing) and the
+    remaining seven all fell back to SEGMENT precision, which is why every event
+    spanned its whole window and covered two to four labelled actions.
+    """
+    return PROMPT.replace(_DURATION_TOKEN, f"{duration_sec:.2f}")
+
 
 def extract_json(text: str) -> str:
     """Extract a JSON object *or array* from a string that may contain markdown.
@@ -85,9 +116,11 @@ def _absolute_timing(
     Returns ``(start, end, warning)``. Both bounds come back ``None`` when the
     model's offsets do not fit the clip.
 
-    The prompt asks for "float offset from segment start" without saying how
-    long the segment is, so a model that cannot time the action guesses a round
-    number. Measured on tt7 at ``max_segment_duration_sec=1.0``: five of seven
+    The prompt now states the clip length (see _render_prompt), which removes the
+    known cause of unusable offsets rather than only the symptom. This stays
+    regardless: a stated bound is an instruction, not a guarantee, and one
+    ignored offset must never cost a usable raw_action. Measured on tt7 at
+    ``max_segment_duration_sec=1.0`` under the old prompt: five of seven
     0.95-second segments came back with ``end_time_sec: 2.0``, an offset twice
     the length of the clip it describes.
 
@@ -252,7 +285,7 @@ def run(ctx: PipelineContext) -> PipelineStageStatus:
                 error_reason="VLM stage disabled",
                 backend="NONE",
                 model_name="NONE",
-                prompt_version="v1",
+                prompt_version=PROMPT_VERSION,
                 segment_start_sec=seg.start_sec,
                 segment_end_sec=seg.end_sec
             )
@@ -311,8 +344,8 @@ def run(ctx: PipelineContext) -> PipelineStageStatus:
     ctx.vlm_observations = []
     
     for seg in ctx.candidate_segments:
-        # Prompt injection for test mocks
-        prompt_with_test_flags = PROMPT
+        # The model is told this clip's length, so the prompt is per segment.
+        prompt_with_test_flags = _render_prompt(seg.end_sec - seg.start_sec)
         if hasattr(ctx, "_test_prompt_flags"):
             prompt_with_test_flags += f"\nTEST_FLAGS: {ctx._test_prompt_flags}"
             
@@ -375,7 +408,7 @@ def run(ctx: PipelineContext) -> PipelineStageStatus:
                         status=VLMSegmentStatus.SUCCESS,
                         backend=vlm.backend,
                         model_name=vlm.model_name,
-                        prompt_version="v1",
+                        prompt_version=PROMPT_VERSION,
                         segment_start_sec=seg.start_sec,
                         segment_end_sec=seg.end_sec,
                         raw_response=raw_response_text,
@@ -401,7 +434,7 @@ def run(ctx: PipelineContext) -> PipelineStageStatus:
                 error_reason=last_error,
                 backend=vlm.backend,
                 model_name=vlm.model_name,
-                prompt_version="v1",
+                prompt_version=PROMPT_VERSION,
                 segment_start_sec=seg.start_sec,
                 segment_end_sec=seg.end_sec,
                 raw_response=raw_response_text
