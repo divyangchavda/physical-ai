@@ -103,13 +103,26 @@ def test_vlm_missing_fields_fails(mock_ctx):
     assert "Validation failed" in obs.error_reason
 
 
-def test_vlm_timestamps_out_of_bounds_fails(mock_ctx):
+def test_vlm_timestamps_out_of_bounds_keeps_the_observation(mock_ctx):
+    """Out-of-range offsets cost the timing, not the answer.
+
+    This asserted FAILED until a real run showed what that cost: tt7 at
+    max_segment_duration_sec=1.0 gave gemini-3.1-flash-lite seven 0.95s clips
+    and five came back with end_time_sec=2.0, a round guess at a length the
+    prompt never states. All five were discarded with their raw_action intact,
+    so seven analysed segments produced two events.
+
+    The bad offsets are dropped rather than clamped — see _absolute_timing —
+    and tests/test_s06_timing.py covers the rule directly.
+    """
     mock_ctx._test_prompt_flags = "return_out_of_bounds"
     s06_vlm.run(mock_ctx)
     obs = mock_ctx.vlm_observations[0]
-    assert obs.status == VLMSegmentStatus.FAILED
-    assert "Validation failed" in obs.error_reason
-    assert "outside segment" in obs.error_reason
+    assert obs.status == VLMSegmentStatus.SUCCESS
+    assert obs.error_reason is None
+    assert obs.raw_action
+    assert obs.start_time_sec is None
+    assert obs.end_time_sec is None
 
 
 def test_remote_vlm_api_failure(mock_ctx):

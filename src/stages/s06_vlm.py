@@ -77,6 +77,72 @@ def extract_json(text: str) -> str:
     return text
 
 
+def _absolute_timing(
+    record: dict, seg_start: float, seg_end: float
+) -> tuple[float | None, float | None, str | None]:
+    """Convert the VLM's relative offsets to absolute seconds.
+
+    Returns ``(start, end, warning)``. Both bounds come back ``None`` when the
+    model's offsets do not fit the clip.
+
+    The prompt asks for "float offset from segment start" without saying how
+    long the segment is, so a model that cannot time the action guesses a round
+    number. Measured on tt7 at ``max_segment_duration_sec=1.0``: five of seven
+    0.95-second segments came back with ``end_time_sec: 2.0``, an offset twice
+    the length of the clip it describes.
+
+    Those five used to be discarded outright. RawVLMObservation enforces that
+    absolute timestamps lie inside the segment, s06 catches the ValueError, and
+    the observation was recorded FAILED -- so a usable ``raw_action`` ("closing
+    the lid", "moving the box") was thrown away over a metadata field, and the
+    run emitted 2 events where 7 segments had been analysed.
+
+    Dropping both bounds rather than clamping is the honest reading. Clamping
+    end to the segment edge invents a boundary the model never reported; an end
+    offset of 2.0 on a 0.95s clip says the model's time frame is wrong, which
+    discredits its start just as much. ``None`` is a case the pipeline already
+    handles -- s07's _timing_precision reports SEGMENT and the event falls back
+    to the segment's own bounds.
+
+    The invariant itself is left alone: downstream stages read it, and s06 owns
+    the conversion, so s06 owns the offsets that do not fit.
+    """
+    raw_start, raw_end = record.get("start_time_sec"), record.get("end_time_sec")
+    if raw_start is None and raw_end is None:
+        return None, None, None
+
+    # The schema asks for a float or null, and a model that ignores both writes
+    # "UNKNOWN" into the field. That is the same failure as an ill-fitting
+    # offset — an unusable timestamp — so it costs the timing, not the answer.
+    try:
+        start = seg_start + float(raw_start) if raw_start is not None else None
+        end = seg_start + float(raw_end) if raw_end is not None else None
+    except (TypeError, ValueError):
+        return None, None, (
+            f"non-numeric offsets {raw_start!r}/{raw_end!r} "
+            f"- timing dropped, raw_action kept"
+        )
+
+    outside = [
+        (name, value)
+        for name, value in (("start_time_sec", start), ("end_time_sec", end))
+        if value is not None and not (seg_start <= value <= seg_end)
+    ]
+    # An end before its own start is the same failure wearing a different mask:
+    # the offsets are not a coherent interval, so neither is kept.
+    if start is not None and end is not None and start > end:
+        outside.append(("start_time_sec > end_time_sec", start))
+
+    if outside:
+        detail = ", ".join(f"{name}={value:.2f}" for name, value in outside)
+        return None, None, (
+            f"{detail} outside segment [{seg_start:.2f}, {seg_end:.2f}] "
+            f"- timing dropped, raw_action kept"
+        )
+
+    return start, end, None
+
+
 def _write_output(ctx: PipelineContext, status: str = "OK") -> None:
     ctx.output_dir.mkdir(parents=True, exist_ok=True)
     out_path = ctx.output_dir / "vlm_observations.json"
@@ -283,11 +349,25 @@ def run(ctx: PipelineContext) -> PipelineStageStatus:
                 batch: list[RawVLMObservation] = []
                 for record in records:
                     data = dict(record)
-                    # Convert relative offsets to absolute timestamps BEFORE validation
-                    if data.get("start_time_sec") is not None:
-                        data["start_time_sec"] = seg.start_sec + float(data["start_time_sec"])
-                    if data.get("end_time_sec") is not None:
-                        data["end_time_sec"] = seg.start_sec + float(data["end_time_sec"])
+                    # Convert relative offsets to absolute timestamps BEFORE
+                    # validation. Offsets that do not fit the clip cost their
+                    # own observation the timing, never the whole answer.
+                    start_abs, end_abs, timing_warning = _absolute_timing(
+                        data, seg.start_sec, seg.end_sec
+                    )
+                    if timing_warning:
+                        logger.warning(
+                            "[%s] segment %s: %s", STAGE, seg.segment_id, timing_warning
+                        )
+                    # Assigned only where the model supplied the key. Writing
+                    # None into an absent key would manufacture the field and
+                    # slip past RawVLMObservation's missing-key check, which is
+                    # what catches a truncated response.
+                    for field in ("start_time_sec", "end_time_sec"):
+                        if field in data:
+                            data[field] = (
+                                start_abs if field == "start_time_sec" else end_abs
+                            )
 
                     batch.append(RawVLMObservation(
                         observation_id=f"obs_{uuid.uuid4().hex[:8]}",
