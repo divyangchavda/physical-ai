@@ -17,16 +17,24 @@
 # so every "push chopper" detection after f42 is printed artwork — that is the
 # score, with no threshold to pick:
 #
-#     vocabulary   real (f<=42)   print (f>42)
-#     baseline          15             29
-#     A                 14             36    worse: naming the surface loses
-#     B                 13             21    this file
+#     vocabulary        real (f<=42)   print (f>42)   chopper tracks
+#     baseline               15             29        f0..42, f45..57, f69..168
+#     A                      14             36        worse on every count
+#     B, span leak           13             21        11 print boxes leaked out
+#                                                     of "push chopper" into
+#                                                     classes of their own, so
+#                                                     21 flattered it
+#     B, leak fixed          15             28        f0..42, f99..144
 #
-# B also removed the phantom chopper tracks at f45-57 and f69-75 entirely,
-# leaving two chopper tracks with 60 frames of nothing between them: real
-# f0..39 and print f99..147. Those phantoms sat inside the 1.0-2.0s INSERT
-# window, so their removal is what makes "the real track ends and never
-# returns" readable as a signal at all.
+# So B barely moves the print COUNT: 29 against 28. Its value is entirely in
+# where the print lands. Baseline scattered phantom chopper detections across
+# f45..168, straddling the 1.0-2.0s INSERT window; B leaves two tracks with 56
+# frames of nothing between them — real f0..42 and print f99..144. That is what
+# makes "the real chopper track ends and never returns" readable as the INSERT
+# signal, and it is the reason to keep this file over the baseline.
+#
+# f99..144 is 3.30-4.80s. The user independently reported the printed artwork is
+# visible on the carton face from 3.3s to 4.8s, having never seen these numbers.
 #
 # vlm.enabled=false — the phantom rate is measured from tracks_raw.json, which
 # s04 writes. No Gemini call, so comparing vocabularies costs nothing but GPU.

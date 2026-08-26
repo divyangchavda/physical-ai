@@ -34,13 +34,18 @@ import base64
 import gzip
 import json
 import subprocess
+import sys
 from collections import Counter
 from pathlib import Path
 
 import cv2
 import yaml
 
-from src.models.groundingdino_hf_detector import (
+# Running this as a script puts tools/ on sys.path, not the repo root, so the
+# src package is not importable without this. Same line as diagnose_stitch.py:40.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from src.models.groundingdino_hf_detector import (  # noqa: E402
     DEFAULT_MODEL_ID,
     GroundingDINOHFDetector,
 )
