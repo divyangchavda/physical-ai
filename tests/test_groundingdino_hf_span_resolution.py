@@ -60,8 +60,8 @@ def test_a_wordpiece_span_of_a_decoy_is_now_droppable():
     assert class_id in det._decoy_ids
 
 
-def test_a_reordered_span_prefers_the_label_sharing_more_words():
-    """"chopper picture" shares 2 words with the decoy and 1 with the real class."""
+def test_a_reordered_span_prefers_the_more_specific_label():
+    """"chopper picture" is 2/5 of the decoy against 1/3 of the real class."""
     det = _det(decoy_classes=DECOYS_B)
     class_id, class_name = det._resolve_class("chopper picture")
     assert class_name == "picture of a push chopper"
@@ -69,18 +69,45 @@ def test_a_reordered_span_prefers_the_label_sharing_more_words():
 
 
 def test_a_bare_head_noun_still_prefers_the_shorter_label():
-    """The counterweight to the test above, and why ranking needs two keys.
+    """The counterweight to the test above, and why the key is Jaccard.
 
     "chopper" shares one word with both "push chopper" and "picture of a push
-    chopper". Shared count alone ties, and the old longest-label rule would
-    hand a genuine chopper detection to the decoy and delete it. The fraction
-    of the label's own words that matched — 1/2 against 1/5 — breaks it toward
-    the real class.
+    chopper". A raw shared-word count ties, and the old longest-label rule
+    would hand a genuine chopper detection to the decoy and delete it.
+    Dividing by the union — 1/2 against 1/5 — breaks it toward the real class.
     """
     det = _det(decoy_classes=DECOYS_B)
     class_id, class_name = det._resolve_class("chopper")
     assert class_name == "push chopper"
     assert class_id not in det._decoy_ids
+
+
+def test_a_decoy_containing_the_real_label_does_not_swallow_it():
+    """The regression that made the first version of this fix worse than none.
+
+    "picture of a push chopper" contains every word of "push chopper", so on a
+    raw shared-word count the superset wins any span that carries one more word
+    than the real label — and the real object is then dropped as a decoy. The
+    tt7 run measured it: 3 genuine chopper detections survived f0..42 against
+    13 before the change, and the real chopper track disappeared entirely.
+
+    The spans below are constructed to cover that shape rather than transcribed
+    from the run, which recorded only the resolved class names. What is measured
+    is the failure: any span whose words are a subset of the longer label loses
+    the real class under shared-count ranking.
+    """
+    det = _det(decoy_classes=DECOYS_B)
+    for span in ("a push chopper", "the push chopper", "push chopper ."):
+        class_id, class_name = det._resolve_class(span)
+        assert class_name == "push chopper", span
+        assert class_id not in det._decoy_ids, span
+
+
+def test_a_leading_modifier_alone_prefers_the_shorter_label():
+    """"push" is shared by both labels and is 1/2 of one, 1/5 of the other."""
+    det = _det(decoy_classes=DECOYS_B)
+    _, class_name = det._resolve_class("push")
+    assert class_name == "push chopper"
 
 
 # ─────────────────────────────────────────── behaviour that must not regress

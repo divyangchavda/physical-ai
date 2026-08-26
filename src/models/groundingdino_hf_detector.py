@@ -230,37 +230,40 @@ class GroundingDINOHFDetector(ObjectDetector):
         if text in self._label_to_id:
             return self._label_to_id[text], text
 
-        # 2. Shared whole words. Substring matching alone was enough while every
-        #    label was one or two words, but it silently fails on longer ones:
-        #    the tokenizer splits "printed carton label" and the post-processor
-        #    returned the span "##on label", which contains no label and is
-        #    contained in none, so it fell through to the unmatched bucket in
-        #    step 3. The unmatched bucket is never filtered, so on tt7 those
-        #    boxes survived as classes of their own — 8 detections tracked as
-        #    "##on label" and 3 as "chopper picture", all of them the chopper
-        #    printed on the carton, i.e. exactly what the decoys existed to
-        #    absorb. Word matching resolves both to their decoy and drops them.
+        # 2. Shared whole words, ranked by Jaccard overlap of the word sets.
+        #    Substring matching alone was enough while every label was one or
+        #    two words, but it silently fails on longer ones: the tokenizer
+        #    splits "printed carton label" and the post-processor returned the
+        #    span "##on label", which contains no label and is contained in
+        #    none, so it fell through to the unmatched bucket in step 3. The
+        #    unmatched bucket is never filtered, so on tt7 those boxes survived
+        #    as classes of their own — 8 detections tracked as "##on label" and
+        #    3 as "chopper picture", all of them the chopper printed on the
+        #    carton, i.e. exactly what the decoys existed to absorb.
         #
-        #    Ranked by shared words first, then by the fraction of the label's
-        #    own words that matched. Both keys are load-bearing, measured
-        #    against the two spans tt7 actually produced:
-        #      "chopper picture" -> 2 shared with "picture of a push chopper"
-        #                           vs 1 with "push chopper"      -> the decoy
-        #      "chopper"         -> 1 shared with each, but 1/2 of "push
-        #                           chopper" against 1/5           -> the real
-        #    Shared count alone would send a bare "chopper" to the long decoy;
-        #    fraction alone would send "chopper picture" to the real class.
-        #    Prompt order breaks any remaining tie, so this is deterministic.
+        #    Jaccard rather than a raw shared-word count, and this is measured,
+        #    not preferred. tt7's decoy "picture of a push chopper" contains
+        #    every word of the real label "push chopper", so on shared count the
+        #    superset wins any span carrying a stop word and the real object is
+        #    dropped as a decoy: that run kept 3 of 13 genuine chopper
+        #    detections at f0..42, against 13 before the change. Dividing by the
+        #    union charges a label for the words the span did NOT contain, which
+        #    is what separates the three cases the tt7 vocabulary produces:
+        #      "a push chopper"  -> 2/3 real   vs 3/5 decoy  -> real
+        #      "chopper picture" -> 1/3 real   vs 2/5 decoy  -> decoy
+        #      "chopper"         -> 1/2 real   vs 1/5 decoy  -> real
+        #    Ties keep the earlier prompt label. Every config puts decoys last,
+        #    so a tie resolves to the real class.
         span_words = set(_words(text))
         best: str | None = None
-        best_key: tuple[int, float] = (0, 0.0)
+        best_score = 0.0
         for label, label_words in zip(self.labels, self._label_words):
             shared = len(span_words & label_words)
             if not shared:
                 continue
-            key = (shared, shared / len(label_words))
-            if best is None or key > best_key:
-                best, best_key = label, key
+            score = shared / (len(span_words) + len(label_words) - shared)
+            if score > best_score:
+                best, best_score = label, score
         if best is not None:
             return self._label_to_id[best], best
 
