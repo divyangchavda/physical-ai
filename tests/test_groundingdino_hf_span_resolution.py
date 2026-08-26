@@ -86,21 +86,52 @@ def test_a_decoy_containing_the_real_label_does_not_swallow_it():
     """The regression that made the first version of this fix worse than none.
 
     "picture of a push chopper" contains every word of "push chopper", so on a
-    raw shared-word count the superset wins any span that carries one more word
-    than the real label — and the real object is then dropped as a decoy. The
-    tt7 run measured it: 3 genuine chopper detections survived f0..42 against
-    13 before the change, and the real chopper track disappeared entirely.
+    raw shared-word count the superset wins any span carrying one more word than
+    the real label — and the real object is then dropped as a decoy. Measured on
+    tt7: 3 genuine chopper detections survived f0..42 against 15 with this
+    ranking, and the real chopper track disappeared from tracks_raw.json.
 
-    The spans below are constructed to cover that shape rather than transcribed
-    from the run, which recorded only the resolved class names. What is measured
-    is the failure: any span whose words are a subset of the longer label loses
-    the real class under shared-count ranking.
+    "push chopper picture" is the span that did it, transcribed from
+    tests/fixtures/tt7_dino_spans.json: 14 occurrences, 12 of them at f<=42
+    where the chopper is still a physical object on the table. Shared count
+    scores it 3 for the decoy against 2 for the real label; Jaccard scores it
+    2/3 against 3/5 and keeps it.
     """
     det = _det(decoy_classes=DECOYS_B)
-    for span in ("a push chopper", "the push chopper", "push chopper ."):
+    class_id, class_name = det._resolve_class("push chopper picture")
+    assert class_name == "push chopper"
+    assert class_id not in det._decoy_ids
+
+
+def test_the_other_observed_chopper_spans_resolve_the_way_tt7_measured():
+    """Every span in the tt7 dump that must survive, and every one that must not.
+
+    Transcribed from tests/fixtures/tt7_dino_spans.json — 505 spans over 67
+    sampled frames. Pinning the full set is what makes a future vocabulary
+    change a testable edit rather than another GPU run.
+    """
+    det = _det(decoy_classes=DECOYS_B)
+    survives = {
+        "push chopper": "push chopper",
+        "push chopper picture": "push chopper",
+        "chopper": "push chopper",
+        "cardboard box": "cardboard box",
+        "cardboard": "cardboard box",
+        "cardboard box carton label": "cardboard box",
+        "person": "person",
+        "dining table": "dining table",
+    }
+    dropped = {
+        "carton label", "printed carton label", "##on label", "carton", "cart",
+        "label", "picture", "chopper picture",
+    }
+    for span, expected in survives.items():
         class_id, class_name = det._resolve_class(span)
-        assert class_name == "push chopper", span
+        assert class_name == expected, span
         assert class_id not in det._decoy_ids, span
+    for span in dropped:
+        class_id, _ = det._resolve_class(span)
+        assert class_id in det._decoy_ids, span
 
 
 def test_a_leading_modifier_alone_prefers_the_shorter_label():

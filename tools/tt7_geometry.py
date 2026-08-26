@@ -1,47 +1,59 @@
 """Read tt7 geometry from observed detections only, with no GPU and no Gemini.
 
-``tests/fixtures/tt7_real_detections.json`` holds every track point of the tt7
-run at commit 7dde80d whose ``detection_confidence`` was above zero — 243 points
-out of 795. The other 552 are Kalman extrapolations: stride 3 means only 67 of
-200 frames were ever shown to GroundingDINO, so two thirds of ``Track.points``
-is interpolation. An earlier pass read track geometry at candidate-window
-boundary frames, which are mostly interpolated, and produced offsets of six box
-widths and size ratios of 1.8. None of that was in the video.
+``tests/fixtures/tt7_real_detections.json`` holds every track point of a tt7 run
+whose ``detection_confidence`` was above zero — 229 points out of 706. The rest
+are Kalman extrapolations: stride 3 means only 67 of 200 frames were ever shown
+to GroundingDINO, so two thirds of ``Track.points`` is interpolation. An earlier
+pass read track geometry at candidate-window boundary frames, which are mostly
+interpolated, and produced offsets of six box widths and size ratios of 1.8.
+None of that was in the video.
 
 Run from the repo root:
 
     python tools/tt7_geometry.py
 
-What the observed detections say, on 2026-08-26:
+What the observed detections say, on 2026-08-26, for the run at 071dd95 with
+config/kaggle_tt7_decoy_b.yaml:
 
-  track  2  push chopper  15 real pts, f6..42   iou vs box6 = 0.000 on all 13
-            shared frames. A genuinely separate object that never once overlaps
-            the cardboard box during its whole observed life.
+  track  3  push chopper  14 real pts, f0..42
+            iou vs box6 = 0.000 on all 12 shared frames. A genuinely separate
+            object that never once overlaps the cardboard box in its observed
+            life, and its last observation is f42 = 1.40s. The user's labels put
+            the chopper inside the carton before 2.0s, so this track ending is
+            the INSERT completing — the object stops existing on screen at the
+            moment the action finishes, which is why no containment test can
+            ever detect this INSERT. The signal is disappearance.
 
-  track  9  push chopper   3 real pts, f45..57
-            f45 iou=0.746 area=1.336 | f54 iou=0.648 area=1.045
-  track 12  push chopper  26 real pts, f69..168
-            f90 iou=0.992 area=1.008 | f93 iou=0.990 area=1.010
+            Its area ratio against the carton falls 0.926 (f6) -> 0.685 (f9) ->
+            0.282 (f15) and then holds near 0.31-0.35. The chopper is not
+            shrinking; the carton is still entering frame and growing. The user
+            reported the chopper is "rock steady from 0.20 to 0.50s while the
+            carton is still entering", which is the same fact from the other
+            side.
 
-            Four detections that are the cardboard box itself, relabelled: same
-            pixels to within 1-2%, and larger than the box rather than inside
-            it. GroundingDINO is matching the words "Push Chopper" printed on
-            the carton. Their centres sit inside the box by construction, so any
-            containment test scores them True for no physical reason.
+  track 13  push chopper  16 real pts, f99..144
+            Wholly inside box6 on all 16 frames — intersection equals its own
+            area exactly, to the float — at 0.178-0.255 of the carton's area.
+            f99..144 is 3.30-4.80s, and the user independently reported the
+            printed artwork is visible on the carton face from 3.3s to 4.8s.
+            This is the print, and it is a clean sub-region of the carton.
 
-  track 12  f99..168  intersection with box6 equals its own area exactly, to
-            the float, on all 22 frames. That is the algebraic signature of
-            A within B. f69 and f75 are not contained (31161 of 119719 px).
+An earlier fixture, from the baseline vocabulary, also contained four detections
+that WERE the carton relabelled: f45 area ratio 1.336, f54 1.045, f90 1.008,
+f93 1.010 — boxes as large as or larger than the box they were supposedly
+inside, which any containment test scores True for no physical reason. Under
+config/kaggle_tt7_decoy_b.yaml there are none: every remaining chopper
+detection is either genuinely separate (track 3) or a genuine sub-region
+(track 13). That, rather than the total print count, is what the decoy
+vocabulary bought.
 
-So the clip contains exactly one containment onset, between f75 (2.50s) and
-f99 (3.30s). tt7 ground truth puts its only INSERT at 1.0-2.0s with a 1.0s
-tolerance, and the chopper's own track (2) stops being detected at f42 = 1.40s.
-Either the label timing or the detector's notion of "chopper" is wrong here;
-these numbers cannot say which, because both stories predict the same boxes.
-
-The duplicate and the containment cases separate on area ratio with room to
-spare: genuine containment peaks at 0.255 (f138), the duplicates start at
-1.008 (f90). A factor of four, no threshold judgment needed.
+One caution this file cannot fix: the run produced a single candidate segment,
+f3..199 = the whole 6.67s clip, where the baseline produced seven. Fewer
+phantom chopper tracks means fewer person-object proximity transitions for
+s05 to cut on. The seven windows were partly an artifact of the phantoms, but
+one window means the VLM is asked to describe all seven labelled actions at
+once and every extracted event inherits the same timestamps. Timing has to
+come from geometry, not from the window.
 """
 from __future__ import annotations
 
