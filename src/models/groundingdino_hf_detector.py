@@ -27,6 +27,7 @@ prompt vocabulary explicitly and anything left over goes to a dedicated
 """
 from __future__ import annotations
 
+import re
 import uuid
 
 import numpy as np
@@ -40,6 +41,20 @@ from src.schema.detection import BoundingBox, Detection
 logger = get_logger(__name__)
 
 DEFAULT_MODEL_ID = "IDEA-Research/grounding-dino-tiny"
+
+_WORD_RE = re.compile(r"[a-z0-9]+")
+
+
+def _words(text: str) -> list[str]:
+    """Whole-word tokens, with BERT wordpiece continuation markers removed.
+
+    The processor returns each grounded span by detokenising the wordpieces it
+    matched, so a label the tokenizer split mid-word comes back carrying the
+    continuation marker: on tt7 the prompt label "printed carton label" was
+    returned as the span "##on label". Stripping "##" turns that back into
+    ordinary words that can be compared with the vocabulary.
+    """
+    return _WORD_RE.findall(text.replace("##", ""))
 
 
 class GroundingDINOHFDetector(ObjectDetector):
@@ -100,6 +115,9 @@ class GroundingDINOHFDetector(ObjectDetector):
         self._label_to_id: dict[str, int] = {
             name: idx for idx, name in enumerate(self.labels)
         }
+        # Word sets for span matching, in prompt order. Precomputed because
+        # _resolve_class runs once per box per frame.
+        self._label_words: list[set[str]] = [set(_words(n)) for n in self.labels]
         # Sentinel bucket for spans that match nothing. Detection.class_id is
         # constrained to >= 0, so this cannot be -1.
         self._unmatched_id: int = len(self.labels)
@@ -212,10 +230,44 @@ class GroundingDINOHFDetector(ObjectDetector):
         if text in self._label_to_id:
             return self._label_to_id[text], text
 
-        # 2. Longest prompt label contained in the span, or vice versa. This
-        #    catches fragments ("chopper" -> "push chopper") and merges
-        #    ("cardboard box chopper" -> "cardboard box").
+        # 2. Shared whole words. Substring matching alone was enough while every
+        #    label was one or two words, but it silently fails on longer ones:
+        #    the tokenizer splits "printed carton label" and the post-processor
+        #    returned the span "##on label", which contains no label and is
+        #    contained in none, so it fell through to the unmatched bucket in
+        #    step 3. The unmatched bucket is never filtered, so on tt7 those
+        #    boxes survived as classes of their own — 8 detections tracked as
+        #    "##on label" and 3 as "chopper picture", all of them the chopper
+        #    printed on the carton, i.e. exactly what the decoys existed to
+        #    absorb. Word matching resolves both to their decoy and drops them.
+        #
+        #    Ranked by shared words first, then by the fraction of the label's
+        #    own words that matched. Both keys are load-bearing, measured
+        #    against the two spans tt7 actually produced:
+        #      "chopper picture" -> 2 shared with "picture of a push chopper"
+        #                           vs 1 with "push chopper"      -> the decoy
+        #      "chopper"         -> 1 shared with each, but 1/2 of "push
+        #                           chopper" against 1/5           -> the real
+        #    Shared count alone would send a bare "chopper" to the long decoy;
+        #    fraction alone would send "chopper picture" to the real class.
+        #    Prompt order breaks any remaining tie, so this is deterministic.
+        span_words = set(_words(text))
         best: str | None = None
+        best_key: tuple[int, float] = (0, 0.0)
+        for label, label_words in zip(self.labels, self._label_words):
+            shared = len(span_words & label_words)
+            if not shared:
+                continue
+            key = (shared, shared / len(label_words))
+            if best is None or key > best_key:
+                best, best_key = label, key
+        if best is not None:
+            return self._label_to_id[best], best
+
+        # 3. Substring fallback, for spans the tokenizer truncated mid-word
+        #    ("choppe") where there is no whole word left to share. Longest
+        #    label wins, as before.
+        best = None
         for label in self.labels:
             if label in text or text in label:
                 if best is None or len(label) > len(best):
@@ -223,7 +275,7 @@ class GroundingDINOHFDetector(ObjectDetector):
         if best is not None:
             return self._label_to_id[best], best
 
-        # 3. Genuinely unknown — record it, do not guess.
+        # 4. Genuinely unknown — record it, do not guess.
         self._unmatched_spans[text] = self._unmatched_spans.get(text, 0) + 1
         return self._unmatched_id, text
 

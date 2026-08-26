@@ -11,9 +11,22 @@
 # genuine detections scored 0.41-0.55, so raising a threshold removes the real
 # object first. The fix has to be a competing label, not a number.
 #
-# The two decoy phrases are a HYPOTHESIS, not a derived value: nothing in any
-# config or run output says which words win a box away from "push chopper".
-# Vocabulary B tries the other approach, and the audit decides between them.
+# The two decoy phrases were a HYPOTHESIS, not a derived value. tt7 has now
+# decided between them. The user confirmed the chopper is physically inside the
+# carton before 2.0s and its own track's last observed detection is f42 (1.40s),
+# so every "push chopper" detection after f42 is printed artwork — that is the
+# score, with no threshold to pick:
+#
+#     vocabulary   real (f<=42)   print (f>42)
+#     baseline          15             29
+#     A                 14             36    worse: naming the surface loses
+#     B                 13             21    this file
+#
+# B also removed the phantom chopper tracks at f45-57 and f69-75 entirely,
+# leaving two chopper tracks with 60 frames of nothing between them: real
+# f0..39 and print f99..147. Those phantoms sat inside the 1.0-2.0s INSERT
+# window, so their removal is what makes "the real track ends and never
+# returns" readable as a signal at all.
 #
 # vlm.enabled=false — the phantom rate is measured from tracks_raw.json, which
 # s04 writes. No Gemini call, so comparing vocabularies costs nothing but GPU.
@@ -32,6 +45,12 @@ detector:
   # noun with the real class, which is the point: the two spans compete directly
   # for the same box, and the more specific one should win on printed pixels. The decoys go LAST so the
   # four real classes keep their class_ids and the runs stay comparable.
+  #
+  # Both phrases are long enough that the tokenizer splits them, and the first
+  # run of this file leaked 11 boxes into classes named "##on label" and
+  # "chopper picture" because span resolution could not match the fragments.
+  # Fixed in groundingdino_hf_detector._resolve_class; a re-run of this file is
+  # what verifies it.
   text_prompt: "person . cardboard box . push chopper . dining table . picture of a push chopper . printed carton label ."
   decoy_classes: ["picture of a push chopper", "printed carton label"]
   device: "auto"
