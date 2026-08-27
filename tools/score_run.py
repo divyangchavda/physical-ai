@@ -48,6 +48,18 @@ VOCABULARY = {
 # Direction implied by each action, for scoring against the label file's own
 # 'direction' field. Written out rather than inferred so the mapping is arguable
 # in the open.
+#
+# Note what this means for the pipeline: direction is a pure function of the verb.
+# There is nothing for geometry to contribute here — get the verb right and the
+# direction follows. Geometry's job is TIMING.
+#
+# The vocabularies on the two sides differ and that was checked rather than
+# assumed: both tt6_ground_truth.json and tt7_ground_truth.json use only
+# ONTO / OFF / INTO / NONE, so the OUT_OF below can only ever be compared against
+# INTO — where OPPOSITE_DIRECTION resolves it to REVERSED, which is correct — or
+# against ONTO/OFF, where OTHER is also correct: OUT_OF is de-containment and OFF
+# is de-support, and the label files distinguish INTO from ONTO precisely so that
+# INSERT can be distinguished from PLACE. No change needed.
 ACTION_DIRECTION: dict[str, str] = {
     "INSERT": "INTO", "CLOSE": "INTO",
     "REMOVE": "OUT_OF", "OPEN": "OUT_OF",
@@ -98,6 +110,33 @@ def _labels_match(vlm_label: str | None, truth_object: str) -> bool:
     return a == b or a in b or b in a
 
 
+def _names_either_role(vlm_label: str | None, action: dict) -> bool:
+    """True when the event's object names either role of a labelled action.
+
+    Testing only ``object`` and never ``target`` threw away correct answers. tt7's
+    INSERT is ``object: push chopper, target: cardboard box``; an event that
+    resolved "cardboard box" was therefore excluded from the INSERT while the six
+    other cardboard-box actions matched, so the pool it was scored against could
+    not contain the very action it got right, and an exactly correct INSERT was
+    reported OTHER.
+
+    That is not hypothetical for this pipeline. s07's _order_objects_by_action
+    exists because the VLM returns the container first — for "placing the push
+    chopper back into the box" it returned ``["box", "push chopper"]`` — so the
+    destination reaching object_label is the specific failure s07 already fights.
+    The scorer must not turn a near miss there into a wrong verb here.
+
+    This widens the pool rather than narrowing it, which does make the upper bound
+    looser. That is visible: the per-event line prints AMBIGUOUS xN, and N grows.
+    A looser bound that can be read off the output is preferable to a tighter one
+    that is wrong in a direction the output does not show.
+    """
+    return (
+        _labels_match(vlm_label, action.get("object", ""))
+        or _labels_match(vlm_label, action.get("target", ""))
+    )
+
+
 def assess(event: dict, actions: list[dict], tolerance: float) -> dict:
     """Describe what an event covers and how well it named it.
 
@@ -116,7 +155,9 @@ def assess(event: dict, actions: list[dict], tolerance: float) -> dict:
         if _overlap(e1 - tolerance, e2 + tolerance, a["start_sec"], a["end_sec"]) > 0
     ]
     # Narrow by object when the event resolved one and it matches something.
-    on_object = [a for a in covered if _labels_match(label, a["object"])]
+    # Either role counts — see _names_either_role for why testing only 'object'
+    # dropped correct answers.
+    on_object = [a for a in covered if _names_either_role(label, a)]
     pool = on_object or covered
 
     if not pool:
