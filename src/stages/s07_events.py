@@ -20,6 +20,11 @@ import uuid
 
 from src.context import PipelineContext
 from src.logging_utils import get_logger
+from src.models.track_changepoints import (
+    from_pipeline_tracks,
+    find_change_points,
+    is_inside,
+)
 from src.schema.episode import PipelineStageStatus
 from src.schema.event import PhysicalEvent, ActionType
 from src.schema.vlm import VLMSegmentStatus
@@ -401,6 +406,56 @@ def _names_an_object(clause: str, vlm_objects: list[str] | None) -> bool:
     )
 
 
+def _surface_track_ids(
+    tracks: list, *, nms_iou: float, min_hits: int
+) -> set[int]:
+    """Tracks that are a marking ON another object, not an object of their own.
+
+    A picture of a thing printed on a carton is detected as that thing. tt7's
+    prompt names two decoy classes to absorb exactly this, and the decoys did
+    absorb 202 boxes — but three of the printed chopper's detections still won
+    the real "push chopper" label, and the tracker built them into a second
+    entity. The run then bound the INSERT event to it: _resolve_object_track
+    breaks a label tie by track length, and the artwork (frames 99-162) outlived
+    the real chopper (frames 0-47). The event said a hand inserted the picture.
+
+    The discriminator is containment, which needs no threshold of mine and is
+    exact: a marking on a surface is wholly inside that surface's box on *every*
+    frame the two are seen together, because it is physically part of it. Measured
+    on tests/fixtures/tt7_real_detections.json:
+
+        push chopper#13 in cardboard box#6 : 16/16 shared frames  <- the artwork
+        push chopper#3  in cardboard box#6 :  0/12 shared frames  <- the real one
+        cardboard box#6 in person#2        :  6/65 shared frames
+        push chopper#3  in person#2        :  4/14 shared frames
+
+    Only the artwork is contained on all of its shared frames; nothing else comes
+    close, so the rule is "every shared frame" rather than a fraction picked to
+    fit. ``is_inside`` carries its own nms_iou guard against a box relabelled as
+    its own contents, and ``min_hits`` — the tracker's own standard for how many
+    observations make something real — sets the minimum number of shared frames,
+    so a one-frame coincidence cannot demote a track.
+
+    Observed points only: ``from_pipeline_tracks`` drops the Kalman
+    extrapolations that make up two thirds of Track.points at stride 3.
+    """
+    observed = from_pipeline_tracks(tracks)
+    surface: set[int] = set()
+    for inner in observed:
+        for outer in observed:
+            if inner.track_id == outer.track_id:
+                continue
+            shared = sorted(set(inner.boxes) & set(outer.boxes))
+            if len(shared) < max(1, min_hits):
+                continue
+            if all(
+                is_inside(inner.boxes[f], outer.boxes[f], nms_iou) for f in shared
+            ):
+                surface.add(inner.track_id)
+                break
+    return surface
+
+
 def _resolve_object_track(
     vlm_objects: list[str] | None,
     segment_tracks: list,
@@ -408,6 +463,7 @@ def _resolve_object_track(
     background_classes: set[str],
     raw_action: str | None = None,
     verb_index: int | None = None,
+    surface_track_ids: frozenset[int] = frozenset(),
 ) -> tuple[int | None, str | None]:
     """Resolve the manipulated object to a track id, or (None, label).
 
@@ -416,6 +472,11 @@ def _resolve_object_track(
     classes are excluded: a "dining table" is never what the hand is acting on.
     Returns the label even when no track matches, so downstream stages can still
     say *what* went unresolved.
+
+    *surface_track_ids* (see :func:`_surface_track_ids`) lose a label tie to any
+    track that is a real object. They are demoted rather than excluded: when the
+    only track matching the label is a printed picture of it, saying so is more
+    use than saying nothing, and the caller can still see which track was bound.
     """
     if not vlm_objects:
         return None, None
@@ -429,16 +490,65 @@ def _resolve_object_track(
 
     for label in ordered:
         scored = [
-            (_match_label(label, t.class_name), len(t.points), t.track_id)
+            (
+                _match_label(label, t.class_name),
+                t.track_id not in surface_track_ids,
+                len(t.points),
+                t.track_id,
+            )
             for t in candidates
         ]
         scored = [s for s in scored if s[0] > 0]
         if scored:
-            # Best label match first, then the longest-lived of those tracks.
-            best = max(scored, key=lambda s: (s[0], s[1]))
-            return best[2], label
+            # Best label match first, then a real object over a marking on one,
+            # then the longest-lived of those tracks.
+            best = max(scored, key=lambda s: (s[0], s[1], s[2]))
+            return best[3], label
 
     return None, ordered[0]
+
+
+def _clause_windows(
+    n_clauses: int,
+    change_secs: list[float],
+    seg_start: float,
+    seg_end: float,
+) -> list[tuple[float, float]] | None:
+    """Cut ``[seg_start, seg_end]`` into *n_clauses* windows at scene changes.
+
+    Returns ``None`` when the change points cannot supply enough cuts, which
+    leaves the caller on its existing whole-segment fallback. Nothing is invented:
+    every boundary is a frame at which the tracks measurably changed.
+
+    The cuts are spread evenly over the *ordered list of change points*, not over
+    time — cut ``i`` of ``n`` is change point ``int(i * k / n)`` of ``k``. That is
+    a rule rather than a fit: no clause is matched to the change point that would
+    score best. Which matters, because on tt7 it has been measured that geometry
+    does NOT beat the naive alternative. tools/tt7_changepoints.py scores this
+    clip's 12 change points against the 7 hand labels at 7/8 in-order, and a
+    CONTROL of 12 evenly spaced times — which never saw the video — scores 8/8.
+
+    So the claim this makes is narrow and is the whole point: clauses of one
+    observation get *distinct* spans where today they all inherit the same
+    segment, which is what tools/score_run.py needs before any attribution is
+    possible at all. It is not a claim that these boundaries are the right ones.
+    """
+    if n_clauses <= 1:
+        return None
+    interior = sorted({s for s in change_secs if seg_start < s < seg_end})
+    k = len(interior)
+    if k < n_clauses - 1:
+        return None
+
+    cuts = [interior[int(i * k / n_clauses)] for i in range(1, n_clauses)]
+    # int(i*k/n) is strictly increasing for k >= n-1, but a repeated change-point
+    # time would still collapse two windows to zero width. Refuse rather than
+    # emit an event with start == end.
+    if any(b <= a for a, b in zip(cuts, cuts[1:])):
+        return None
+
+    bounds = [seg_start, *cuts, seg_end]
+    return list(zip(bounds, bounds[1:]))
 
 
 
@@ -454,6 +564,40 @@ def _extract_events_from_vlm_observations(ctx: PipelineContext) -> list[Physical
     track_by_id = {t.track_id: t for t in ctx.tracks}
     person_classes = {c.lower() for c in ctx.config.segment.person_classes}
     background_classes = {c.lower() for c in ctx.config.segment.background_classes}
+
+    # Both derived once per run from the config's own numbers. See
+    # _surface_track_ids and src/models/track_changepoints for where each
+    # threshold comes from; none of them is a judgement made here.
+    nms_iou = ctx.config.detector.nms_iou
+    min_hits = ctx.config.tracker.min_hits
+    stride = ctx.config.frame_sampling.every_n_frames
+    fps = ctx.video_metadata.fps if ctx.video_metadata else 0.0
+
+    surface_ids = frozenset(
+        _surface_track_ids(ctx.tracks, nms_iou=nms_iou, min_hits=min_hits)
+    )
+    if surface_ids:
+        logger.info(
+            "[%s] %d track(s) are a marking on another object, demoted when "
+            "binding objects: %s",
+            STAGE, len(surface_ids),
+            {tid: track_by_id[tid].class_name
+             for tid in sorted(surface_ids) if tid in track_by_id},
+        )
+
+    # Frames at which the tracks measurably changed, used to give the clauses of
+    # one observation distinct spans. Computed once; filtered per segment below.
+    change_points = (
+        find_change_points(
+            from_pipeline_tracks(ctx.tracks),
+            nms_iou=nms_iou,
+            stride=stride,
+            min_hits=min_hits,
+            fps=fps,
+            exclude_classes=frozenset(background_classes),
+        )
+        if fps > 0.0 else []
+    )
 
     for obs in ctx.vlm_observations:
         if obs.status != VLMSegmentStatus.SUCCESS:
@@ -477,12 +621,43 @@ def _extract_events_from_vlm_observations(ctx: PipelineContext) -> list[Physical
         clauses = _action_clauses((obs.raw_action or "").lower(), obs.objects)
 
         # The VLM's own offsets describe the sentence. When the sentence held
-        # several actions they cannot be attributed to one of them, so the
-        # segment bounds are the honest answer and the precision says so.
+        # several actions they cannot be attributed to one of them from the text,
+        # so the spans come from geometry: the frames at which this segment's own
+        # tracks changed, cut into one window per clause. When the change points
+        # cannot supply enough cuts, the segment bounds remain the honest answer.
         multi = len(clauses) > 1
+        windows: list[tuple[float, float]] | None = None
         if multi:
+            segment_track_ids = {t.track_id for t in segment_tracks}
+            change_secs = [
+                p.sec for p in change_points if p.track_id in segment_track_ids
+            ]
+            windows = _clause_windows(
+                len(clauses), change_secs,
+                obs.segment_start_sec, obs.segment_end_sec,
+            )
             start_sec, end_sec = obs.segment_start_sec, obs.segment_end_sec
+            # timing_precision stays in {EXACT, SEGMENT}: src/schema/episode.py
+            # and interaction_graph.py declare it a Literal and state_inferencer
+            # coerces anything else, so a third value would break those stages.
+            # A derived window is not the VLM localising the action, so SEGMENT is
+            # correct either way; timing_source records where the span came from.
             timing_precision = "SEGMENT"
+            timing_source = "CHANGE_POINT" if windows else "SEGMENT"
+            if windows:
+                logger.info(
+                    "[%s] segment %s: %d clauses cut at change points -> %s",
+                    STAGE, obs.segment_id, len(clauses),
+                    [f"[{a:.2f}, {b:.2f}]" for a, b in windows],
+                )
+            else:
+                logger.info(
+                    "[%s] segment %s: %d clauses but only %d interior change "
+                    "point(s) — all clauses keep the segment span",
+                    STAGE, obs.segment_id, len(clauses),
+                    len({s for s in change_secs
+                         if obs.segment_start_sec < s < obs.segment_end_sec}),
+                )
         else:
             start_sec = (
                 obs.start_time_sec if obs.start_time_sec is not None
@@ -493,8 +668,11 @@ def _extract_events_from_vlm_observations(ctx: PipelineContext) -> list[Physical
                 else obs.segment_end_sec
             )
             timing_precision = _timing_precision(obs)
+            timing_source = "VLM" if timing_precision == "EXACT" else "SEGMENT"
 
-        for action_type, verb_index in clauses:
+        for clause_index, (action_type, verb_index) in enumerate(clauses):
+            if windows is not None:
+                start_sec, end_sec = windows[clause_index]
             clause_text = (
                 _clause_after((obs.raw_action or "").lower(), verb_index)
                 if verb_index is not None else None
@@ -518,6 +696,7 @@ def _extract_events_from_vlm_observations(ctx: PipelineContext) -> list[Physical
                     object_track_id, object_label = _resolve_object_track(
                         obs.objects, segment_tracks, person_classes,
                         background_classes, raw_action=clause_text, verb_index=0,
+                        surface_track_ids=surface_ids,
                     )
                 else:
                     # "closing the lid" names a part the VLM never listed as an
@@ -530,6 +709,7 @@ def _extract_events_from_vlm_observations(ctx: PipelineContext) -> list[Physical
                     obs.objects, segment_tracks, person_classes,
                     background_classes,
                     raw_action=obs.raw_action, verb_index=verb_index,
+                    surface_track_ids=surface_ids,
                 )
 
             # Create PhysicalEvent
@@ -557,6 +737,12 @@ def _extract_events_from_vlm_observations(ctx: PipelineContext) -> list[Physical
                     "uncertainty": obs.uncertainty,
                     "model_name": obs.model_name,
                     "timing_precision": timing_precision,
+                    # Where start_sec/end_sec actually came from. Kept separate
+                    # from timing_precision because that field is a Literal in
+                    # three schemas; this one is free text in attributes, so a
+                    # geometry-derived window is distinguishable from a segment
+                    # fallback without breaking a downstream validator.
+                    "timing_source": timing_source,
                     # Which clause of raw_action produced this event. With one
                     # observation now yielding several, there is otherwise no
                     # way to tell them apart in events.json.
