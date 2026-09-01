@@ -368,6 +368,7 @@ def main() -> int:
     args.out.mkdir(parents=True, exist_ok=True)
 
     records: list[dict] = []
+    results_path = args.out / "results.json"
     for i, clip in enumerate(selected, start=1):
         record = run_one(clip, args.bundle, args.config, args.out, args.python)
         records.append(record)
@@ -375,18 +376,23 @@ def main() -> int:
                 "NO_EVENTS": "none", "NO_OUTPUT": "FAIL"}[record["verdict"]]
         print(f"[{i:>3}/{len(selected)}] {mark} {clip['clip_id']:>7}  "
               f"want {clip['action']:<8} got {str(record['got']):<8} "
-              f"{record['seconds']:>5.1f}s  {clip['label'][:44]}")
+              f"{record['seconds']:>5.1f}s  {clip['label'][:44]}",
+              flush=True)
+        # Written after every clip rather than at the end. At ~38s per clip the
+        # full bundle is nearly two hours, and an interruption at clip 180 must
+        # not cost the measurement — the per-clip events.json would survive but
+        # the verdicts would not.
+        results_path.write_text(
+            json.dumps({"_config": str(args.config),
+                        "_bundle": str(args.bundle),
+                        "_counts": manifest.get("_counts"),
+                        "results": merge_results(results_path, [record])},
+                       indent=2),
+            encoding="utf-8",
+        )
 
-    merged = merge_results(args.out / "results.json", records)
-    (args.out / "results.json").write_text(
-        json.dumps({"_config": str(args.config),
-                    "_bundle": str(args.bundle),
-                    "_counts": manifest.get("_counts"),
-                    "results": merged}, indent=2),
-        encoding="utf-8",
-    )
-    report(merged)
-    print(f"\nresults -> {args.out / 'results.json'}")
+    report(merge_results(results_path, records))
+    print(f"\nresults -> {results_path}")
     return 0
 
 
