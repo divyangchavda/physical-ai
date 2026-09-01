@@ -1,0 +1,83 @@
+{
+  "_source": "Kaggle run B_seg1, 2026-09-01 07:38-07:41, commit f592eab",
+  "_video": "tt7.mp4, 200 frames @ 30fps",
+  "_config": "config/kaggle_tt7_decoy_b.yaml with --set segment.max_segment_duration_sec=1.0 --set vlm.enabled=true --set vlm.backend=GEMINI --set vlm.model_name=gemini-3.1-flash-lite",
+  "_why": [
+    "This is the run that reproduced the OPEN-for-CLOSE inversion for the fourth",
+    "time, and it is the baseline the state-contradiction fix is measured against.",
+    "It scored: 2 EXACT, 2 REVERSED, 3 OTHER; 7/7 WITHIN_TOL; 3/7 unambiguous.",
+    "",
+    "The inversion is not a phrasing problem. All three OPEN answers describe the",
+    "transition progressively -- 'flaps are being unfolded', 'flap is being",
+    "lifted' -- so there is no closed-word inside any one answer to contradict",
+    "the verb. The contradiction is only visible ACROSS observations: the model",
+    "itself calls the box 'an open cardboard box' at 0.0s, and a box that is",
+    "already open cannot be opened three more times.",
+    "",
+    "Ground truth for this stretch is FOLD 2.0-3.0 then CLOSE 3.0-4.0."
+  ],
+  "_fields": {
+    "verbatim": [
+      "segment_start_sec / segment_end_sec are the seven 0.952s windows the run",
+      "produced (the same bounds recorded in tests/test_s06_timing.py).",
+      "raw_action, state_change and visible_facts are copied character for",
+      "character from vlm_observations.json."
+    ],
+    "absent": [
+      "actor, active_hand, objects, inference, uncertainty, confidence and the",
+      "id fields were not read back off the Kaggle box and are NOT reproduced",
+      "here. Nothing in this fixture may depend on them."
+    ]
+  },
+  "observations": [
+    {
+      "segment_start_sec": 0.0,
+      "segment_end_sec": 0.9523809523809524,
+      "raw_action": "holding and moving a cardboard box",
+      "state_change": "UNKNOWN",
+      "visible_facts": "the person's right hand is holding the top flap of an open cardboard box"
+    },
+    {
+      "segment_start_sec": 0.9523809523809524,
+      "segment_end_sec": 1.9047619047619049,
+      "raw_action": "placing a plastic container into a cardboard box",
+      "state_change": "plastic container is now inside the cardboard box",
+      "visible_facts": "left hand holds a plastic container and moves it downward into an open cardboard box"
+    },
+    {
+      "segment_start_sec": 1.9047619047619049,
+      "segment_end_sec": 2.857142857142857,
+      "raw_action": "opening the flaps of a cardboard box",
+      "state_change": "box flaps are being unfolded",
+      "visible_facts": "hands are pulling the cardboard flaps of the box outward"
+    },
+    {
+      "segment_start_sec": 2.857142857142857,
+      "segment_end_sec": 3.8095238095238098,
+      "raw_action": "opening the top flaps of a cardboard box",
+      "state_change": "box flaps are being unfolded",
+      "visible_facts": "hands are gripping and pulling apart the top flaps of a box labeled 'Push Chopper'"
+    },
+    {
+      "segment_start_sec": 3.8095238095238098,
+      "segment_end_sec": 4.761904761904762,
+      "raw_action": "opening the top flap of a cardboard box",
+      "state_change": "box flap is being lifted",
+      "visible_facts": "hands are gripping the top flaps of the box and pulling them apart"
+    },
+    {
+      "segment_start_sec": 4.761904761904762,
+      "segment_end_sec": 5.714285714285714,
+      "raw_action": "holding and presenting a box",
+      "state_change": "UNKNOWN",
+      "visible_facts": "the person's hands are positioned on the sides of the box, holding it steady in front of the camera"
+    },
+    {
+      "segment_start_sec": 5.714285714285714,
+      "segment_end_sec": 6.666666666666667,
+      "raw_action": "holding and rotating a box",
+      "state_change": "UNKNOWN",
+      "visible_facts": "right hand is gripping the side of a rectangular box, rotating it slightly"
+    }
+  ]
+}

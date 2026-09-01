@@ -551,6 +551,154 @@ def _clause_windows(
     return list(zip(bounds, bounds[1:]))
 
 
+# Verbs that set a binary object state, with the state each one requires the
+# object to be in beforehand and the state it leaves behind. Only these two
+# qualify: every other ActionType either has no binary state (MOVE, TOUCH) or
+# does not become impossible by being repeated (you can PICK an object twice).
+_STATE_VERBS: dict[ActionType, tuple[str, str]] = {
+    ActionType.OPEN: ("CLOSED", "OPEN"),
+    ActionType.CLOSE: ("OPEN", "CLOSED"),
+}
+_COMPLEMENT: dict[ActionType, ActionType] = {
+    ActionType.OPEN: ActionType.CLOSE,
+    ActionType.CLOSE: ActionType.OPEN,
+}
+
+# Explicit state evidence. Deliberately wider than the patterns in
+# src/models/state_inferencer.py, which are `is open|opened` and
+# `is closed|closed|shuts` — those miss the only seed tt7 actually provides.
+# Measured, not preferred: the run's first observation says "holding the top flap
+# of an open cardboard box", where "open" is a bare adjective that `is open`
+# cannot match. Adding the bare form is what the text forces.
+#
+# "open" does not match "opening": \b requires a boundary after the n, and
+# "opening" continues with an i. That is essential — a progressive verb describes
+# an action in flight, not a state that has been reached, and letting "opening"
+# seed OPEN would make every one of these observations vouch for itself.
+_OPEN_EVIDENCE = re.compile(r"\b(?:is open|was open|opened|open)\b")
+_CLOSED_EVIDENCE = re.compile(r"\b(?:is closed|was closed|closed|shut|shuts)\b")
+
+
+def _state_evidence(event: PhysicalEvent) -> tuple[str, str] | None:
+    """Read an explicit open/closed state off one event's observed text.
+
+    Returns ``(state, the phrase it came from)``, or ``None`` when the text says
+    nothing about the state. Only ``visible_facts`` and ``state_change`` are
+    consulted:
+
+    * ``raw_action`` is excluded because it holds the verb under test. "closing
+      the box" would seed CLOSED and then veto its own CLOSE.
+    * ``inference`` is excluded because the prompt defines it as the model's
+      reasoning *beyond* what is visible, so it is the one field explicitly not
+      evidence.
+
+    A text mentioning both states is ambiguous and seeds nothing, rather than
+    letting match order decide.
+    """
+    for field in ("visible_facts", "state_change"):
+        text = (event.attributes.get(field) or "").lower()
+        if not text:
+            continue
+        opened = _OPEN_EVIDENCE.search(text)
+        closed = _CLOSED_EVIDENCE.search(text)
+        if opened and closed:
+            continue
+        if opened:
+            return "OPEN", opened.group(0)
+        if closed:
+            return "CLOSED", closed.group(0)
+    return None
+
+
+def _resolve_state_contradictions(events: list[PhysicalEvent]) -> list[PhysicalEvent]:
+    """Correct state verbs that the object's own tracked state makes impossible.
+
+    The failure this exists for, from the B_seg1 run of tt7 (committed verbatim
+    as tests/fixtures/tt7_b_seg1_observations.json)::
+
+        0.00  "...holding the top flap of an OPEN cardboard box"
+        1.90  "opening the flaps of a cardboard box"
+        2.86  "opening the top flaps of a cardboard box"
+        3.81  "opening the top flap of a cardboard box"
+
+    Ground truth is FOLD then CLOSE. A box the model itself called open at 0.0s
+    cannot be opened three more times; for a binary state, OPEN applied to an
+    already-OPEN object is unsatisfiable, and the only transition still available
+    to those flaps is closing. That is a deduction from the model's own words,
+    not a threshold chosen here, and the seed state is required to be an explicit
+    word in the text — an object with no stated state is never touched.
+
+    Runs of the same verb on the same object are corrected **together**. Treating
+    them one at a time flips the state after each event, so the second OPEN would
+    find a CLOSED box, read as satisfiable, and survive — the corrections would
+    alternate instead of converging. Consecutive identical state verbs on one
+    object are one continuing transition, which is also the only physical reading:
+    a binary state cannot be set to the same value three times by three actions.
+
+    Every rewrite records ``verb_source``, the phrase that seeded the state and
+    when it was said, so no correction is invisible in events.json.
+    """
+    ordered = sorted(range(len(events)), key=lambda i: events[i].start_sec)
+    # track_id -> (state, the phrase that said so, when it was said)
+    state: dict[int, tuple[str, str, float]] = {}
+    corrected = 0
+
+    pos = 0
+    while pos < len(ordered):
+        idx = ordered[pos]
+        event = events[idx]
+        verb, obj = event.action, event.object_track_id
+
+        if verb not in _STATE_VERBS or obj is None:
+            # Not a state verb, so it cannot contradict anything — but its text
+            # may still be the only place the object's state is ever stated.
+            seen = _state_evidence(event)
+            if seen and obj is not None:
+                state[obj] = (seen[0], seen[1], event.start_sec)
+            pos += 1
+            continue
+
+        # The maximal run of this same verb on this same object.
+        run = [idx]
+        while pos + len(run) < len(ordered):
+            nxt = events[ordered[pos + len(run)]]
+            if nxt.action is not verb or nxt.object_track_id != obj:
+                break
+            run.append(ordered[pos + len(run)])
+
+        known = state.get(obj)
+        _, yields = _STATE_VERBS[verb]
+        if known is not None and known[0] == yields:
+            replacement = _COMPLEMENT[verb]
+            for i in run:
+                events[i].action = replacement
+                events[i].attributes["verb_source"] = "STATE_UNSATISFIABLE"
+                events[i].attributes["verb_before_correction"] = verb.value
+                events[i].attributes["state_evidence"] = (
+                    f"{obj} already {known[0]} from \"{known[1]}\" "
+                    f"at {known[2]:.2f}s"
+                )
+            corrected += len(run)
+            logger.info(
+                "[%s] track %d was already %s (\"%s\" at %.2fs); %d consecutive "
+                "%s event(s) are unsatisfiable -> %s",
+                STAGE, obj, known[0], known[1], known[2], len(run),
+                verb.value, replacement.value,
+            )
+            state[obj] = (_STATE_VERBS[replacement][1], "corrected verb",
+                          events[run[-1]].start_sec)
+        else:
+            state[obj] = (yields, f"{verb.value} event", events[run[-1]].start_sec)
+
+        pos += len(run)
+
+    if corrected:
+        logger.info(
+            "[%s] %d of %d event(s) had a state verb the object's own tracked "
+            "state made impossible", STAGE, corrected, len(events),
+        )
+    return events
+
 
 def _extract_events_from_vlm_observations(ctx: PipelineContext) -> list[PhysicalEvent]:
     """Convert VLM observations to PhysicalEvent objects."""
@@ -759,7 +907,8 @@ def _extract_events_from_vlm_observations(ctx: PipelineContext) -> list[Physical
                         STAGE, event.event_id, event.action, event.confidence,
                         event.start_sec, event.end_sec)
 
-    return events
+    # Last, because it reads the object each event resolved and needs them all.
+    return _resolve_state_contradictions(events)
 
 
 def run(ctx: PipelineContext) -> PipelineStageStatus:
