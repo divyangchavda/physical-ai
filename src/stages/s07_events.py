@@ -17,6 +17,7 @@ import json
 import re
 import time
 import uuid
+from functools import lru_cache
 
 from src.context import PipelineContext
 from src.logging_utils import get_logger
@@ -48,22 +49,52 @@ _ACTION_STEMS: tuple[tuple[tuple[str, ...], ActionType], ...] = (
     (("fold", "assembl"), ActionType.UNKNOWN),
     (("releas", "let go"), ActionType.RELEASE),
     (("insert",), ActionType.INSERT),
-    (("remov",), ActionType.REMOVE),
+    (("remov", "retriev", "peel"), ActionType.REMOVE),
     (("pick",), ActionType.PICK),
-    (("plac", "put down"), ActionType.PLACE),
+    # "drop" is PLACE rather than RELEASE so the preposition promotion below can
+    # do its job: "dropped a piece of paper into a trash can" is an INSERT, and
+    # it reaches that through PLACE + "into" instead of a rule of its own.
+    (("plac", "put down", "drop"), ActionType.PLACE),
     (("grasp", "grip", "hold"), ActionType.GRASP),
-    (("push",), ActionType.PUSH),
+    # "flick" is a displacement by brief contact, which is what PUSH means here.
+    (("push", "flick"), ActionType.PUSH),
     (("pull",), ActionType.PULL),
-    (("open",), ActionType.OPEN),
+    (("open", "uncap"), ActionType.OPEN),
     (("clos",), ActionType.CLOSE),
     # Placed after open/close deliberately: "opening and unpacking a box" is an
     # OPEN, while "unboxing a push chopper" has no other verb and is a REMOVE.
     (("unbox", "unpack"), ActionType.REMOVE),
     (("using", "use"), ActionType.USE_TOOL),
-    (("touch",), ActionType.TOUCH),
+    # "tapp"/"taps" rather than "tap" so the noun "tape" cannot match. "press" is
+    # contact without displacement; it sits after PUSH above, so a caption naming
+    # both ("pushing and pressing") still resolves to PUSH.
+    (("touch", "tapp", "taps", "press"), ActionType.TOUCH),
     (("inspect", "examin"), ActionType.INSPECT),
-    (("mov",), ActionType.MOVE),
+    # "slid" covers sliding/slides/slid. It is MOVE and not PUSH or PULL: "sliding
+    # a bottle across a table" names a displacement and no direction. Six clips in
+    # the SSv2 run are labelled PUSH or PULL and described this way; they stay
+    # wrong, because choosing a direction the caption does not state would be
+    # fitting the table to the answer sheet.
+    (("mov", "slid"), ActionType.MOVE),
+    # Last on purpose, and inflected forms only. Each of these is a noun as often
+    # as a verb ("the blue plug", "put the stuff down", "a length of thread"), and
+    # morphology cannot tell the two apart — but the bare noun is uninflected, so
+    # requiring "-ing"/"-ed" admits the verb and rejects the noun. Being last as
+    # well means that even if one slipped through it could not outrank a real verb.
+    (("plugging", "plugged", "stuffing", "stuffed",
+      "threading", "threaded"), ActionType.INSERT),
 )
+
+# Deliberately NOT stems, though each would have gained a clip in the SSv2 run:
+#   "point"  — "pointing at the title of the book" is labelled TOUCH by SSv2, but
+#              pointing at a thing is not touching it.
+#   "rotat"  — "rotating the lid" is OPEN in one clip and CLOSE in another. The
+#              word names a motion, not a primitive.
+#   "rest"   — matches the static "resting above the CD", which is a state and
+#              not an action at all.
+#   "unfold" — the same several-primitives-at-once problem as "fold" above.
+#   "lift"   — the two clips it would have matched are labelled GRASP and MOVE,
+#              so PICK would still be wrong and there is no evidence for it.
 
 # A preposition changes which primitive a generic verb is. "placing the chopper
 # inside the box" is an INSERT, not a PLACE; the verb alone cannot tell you.
@@ -210,6 +241,30 @@ def _strip_object_phrases(action_lower: str, objects: list[str] | None) -> str:
     return action_lower
 
 
+# Suffixes a stem may pick up and still be the same verb. The stems above are
+# prefixes ("plac" for placing/placed/places), and a bare prefix search also
+# matches an unrelated longer word: measured over the 192 captions of the 200-clip
+# SSv2 run, "fold" matched "folder", "hold" matched "holder", "open" matched
+# "opener" and "clos" matched "closer". That is not cosmetic. "fold" carries the
+# highest precedence in the table, so "placing a digital thermometer on top of a
+# red folder" resolved to UNKNOWN — the object's name outranked the actual verb.
+# Object blanking hides it only when the VLM names an object the detector listed.
+#
+# Bounding the match to an inflection keeps every intended form (placing, placed,
+# places, place; pushes; gripping) and rejects the noun.
+_STEM_SUFFIXES = ("ing", "ped", "ping", "ged", "ging", "ned", "ning",
+                  "es", "ed", "s", "e", "d", "")
+
+
+@lru_cache(maxsize=None)
+def _stem_pattern(stem: str) -> re.Pattern[str]:
+    """``stem`` as a whole inflected word, not as any word starting with it."""
+    return re.compile(
+        r"\b" + re.escape(stem)
+        + "(?:" + "|".join(_STEM_SUFFIXES) + r")\b"
+    )
+
+
 def _match_action(
     action_lower: str, objects: list[str] | None
 ) -> tuple[ActionType, int | None]:
@@ -225,7 +280,7 @@ def _match_action(
     for stems, action in _ACTION_STEMS:
         starts = [
             m.start() for m in
-            (re.search(r"\b" + re.escape(s), text) for s in stems)
+            (re.search(_stem_pattern(s), text) for s in stems)
             if m is not None
         ]
         if starts:
