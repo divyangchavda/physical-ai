@@ -1,0 +1,85 @@
+# SSv2 ground-truth evaluation — verb accuracy over many labelled clips.
+#
+# Why this file exists: every number this project has is measured on one 6.7s
+# video with seven hand-written labels, where a uniform grid of times scores 8/8
+# against our geometry's 7/8. SSv2 gives one human-verified action label per clip
+# over 220,847 clips, and one clip is one action spanning the whole clip, so a
+# verb is either right or it is not — no timing ambiguity to argue about.
+#
+# What is deliberately NOT tested here:
+#   * object detection — detector.text_prompt is built per clip from that clip's
+#     own `placeholders` by tools/ssv2_eval.py, so the object names are GIVEN.
+#     That is the point: it isolates the verb, which is what we have been fixing.
+#   * timing — SSv2 has no timestamps.
+#
+# Every value below is either copied from config/kaggle_tt7_decoy_b.yaml (the
+# configuration all current tt7 numbers were measured under) or changed for a
+# stated reason. Nothing is tuned to an SSv2 score, because no SSv2 score exists
+# yet.
+
+output_dir: "/kaggle/working/runs/ssv2"
+
+frame_sampling:
+  # UNCHANGED from tt7 at 3. SSv2 clips are ~12 fps against tt7's 30, so this is
+  # ~4 sampled frames per second rather than ~10, and the tracker's min_hits of 3
+  # therefore needs 0.75s of continuous detection instead of 0.3s. That is a real
+  # difference and it may cost tracks on the shortest clips. It is left alone on
+  # purpose for the first run: the tracker settings below were validated at
+  # stride 3, and changing two things at once would make a zero-event clip
+  # unattributable. The count of clips yielding no events is reported, and if it
+  # is high, this is the single value to change next.
+  every_n_frames: 3
+
+detector:
+  backend: "groundingdino_hf"
+  model: "IDEA-Research/grounding-dino-tiny"
+  confidence: 0.20
+  text_threshold: 0.25
+  # Placeholder only. tools/ssv2_eval.py overrides this per clip with
+  #   "person . hand . table . <that clip's placeholders> ."
+  # "hand" is included because SSv2 is shot close-in and many clips show only
+  # hands and forearms, where "person" alone can ground nothing — and with no
+  # person class detected, s05 produces no segments and the clip scores nothing.
+  # "table" is included because the surface is usually the unnamed second object
+  # of a PLACE label ("Putting [something] on a surface" lists one placeholder).
+  text_prompt: "person . hand . table ."
+  # No decoys. The tt7 decoys name that carton's printed artwork and mean nothing
+  # on 220,000 other clips; a decoy list has to be earned per vocabulary.
+  decoy_classes: []
+  device: "auto"
+  nms_iou: 0.45
+  drop_unlabeled: true
+
+tracker:
+  # UNCHANGED from tt7. These are the values every tracking number in the project
+  # was measured under.
+  backend: "kalman_sparse"
+  iou_threshold: 0.20
+  max_age: 15
+  min_hits: 3
+  max_missed_detections: 5
+
+segment:
+  # "hand" joins "person" because it is an actor class here for the reason given
+  # above, and s05 keys segmentation off these names.
+  person_classes: ["person", "hand"]
+  background_classes: ["table"]
+  # One segment per clip, which is the whole reason SSv2 removes the ambiguity
+  # that blocks tt7: one clip carries exactly one labelled action. SSv2 clips run
+  # to a few seconds, so 30.0 is comfortably above any of them and the split
+  # never fires. Contrast tt7, where 1.0 was needed to get seven actions out of
+  # one 6.7s video.
+  max_segment_duration_sec: 30.0
+
+vlm:
+  enabled: true
+  backend: "GEMINI"
+  # Fixed by the user: the model does not change.
+  model_name: "gemini-3.1-flash-lite"
+  # No frames-per-segment knob exists in VLMConfig, so none is set here. s06
+  # decides how many frames it sends; the `_MAX_FRAMES = 16` constant in
+  # gemini_vlm.py is dead code and does not control it.
+
+# No `quality:` section: PipelineConfig has no such field, so writing one here
+# would be a knob that silently does nothing. s11_score's thresholds stay at the
+# values every tt7 number was measured under.
