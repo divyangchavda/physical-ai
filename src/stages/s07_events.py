@@ -579,12 +579,16 @@ _OPEN_EVIDENCE = re.compile(r"\b(?:is open|was open|opened|open)\b")
 _CLOSED_EVIDENCE = re.compile(r"\b(?:is closed|was closed|closed|shut|shuts)\b")
 
 
-def _state_evidence(event: PhysicalEvent) -> tuple[str, str] | None:
+def _state_evidence(event: PhysicalEvent) -> tuple[str, str, int, str] | None:
     """Read an explicit open/closed state off one event's observed text.
 
-    Returns ``(state, the phrase it came from)``, or ``None`` when the text says
-    nothing about the state. Only ``visible_facts`` and ``state_change`` are
-    consulted:
+    Returns ``(state, the phrase it came from, that phrase's character offset,
+    the text it was found in)``, or ``None`` when the text says nothing about the
+    state. The offset and text are returned because the state word does not
+    necessarily describe the object the *action* is on — see ``_state_subject``,
+    which needs both to decide which object is meant.
+
+    Only ``visible_facts`` and ``state_change`` are consulted:
 
     * ``raw_action`` is excluded because it holds the verb under test. "closing
       the box" would seed CLOSED and then veto its own CLOSE.
@@ -604,10 +608,75 @@ def _state_evidence(event: PhysicalEvent) -> tuple[str, str] | None:
         if opened and closed:
             continue
         if opened:
-            return "OPEN", opened.group(0)
+            return "OPEN", opened.group(0), opened.start(), text
         if closed:
-            return "CLOSED", closed.group(0)
+            return "CLOSED", closed.group(0), closed.start(), text
     return None
+
+
+def _best_label_track(label: str, label_to_track: dict[str, int]) -> int | None:
+    """The track some event already resolved for *label*, by the usual matcher.
+
+    ``_match_label`` is reused rather than a second rule, so "box" reaches a
+    "cardboard box" track exactly as it does when binding an event's object.
+    """
+    best_score, best_track = 0, None
+    for resolved, track_id in label_to_track.items():
+        score = _match_label(label, resolved)
+        if score > best_score:
+            best_score, best_track = score, track_id
+    return best_track
+
+
+def _state_subject(
+    text: str,
+    offset: int,
+    candidate_labels: list[str],
+    label_to_track: dict[str, int],
+) -> int | None:
+    """The track a state word at *offset* describes: the nearest object named.
+
+    The reason this exists, from the C_seg1 run of tt7::
+
+        "holding a small kitchen appliance in their left hand
+         and an OPEN cardboard box in their right hand"   -> GRASP, object=push chopper
+
+    The run's only state word is in that sentence, but the event it belongs to
+    resolved the *chopper*, so seeding the event's own object recorded the box's
+    openness against the chopper and the three OPEN events on the box found
+    nothing to contradict. The state word describes whatever noun it sits beside,
+    which is not in general the noun the verb acts on.
+
+    Nearest-by-character-offset is a stated design choice, not a measured
+    constant: there is no threshold here, only which mention is closer in the
+    text that arrived. It is wrong under distant modification ("the box that the
+    chopper came out of is open" picks the chopper). ``_mention_index`` supplies
+    the offsets, so a label the text never names cannot be chosen at all — on the
+    sentence above "push chopper" falls back to its head noun "chopper", which
+    that text does not contain, leaving "cardboard box" as the only candidate.
+
+    Ties break toward the longer label, then the lower track id, so the result
+    never depends on dict ordering.
+    """
+    best: tuple[int, int, int] | None = None
+    seen_labels: set[str] = set()
+    for label in candidate_labels:
+        key = label.strip().lower()
+        if not key or key in seen_labels:
+            continue
+        seen_labels.add(key)
+        track_id = label_to_track.get(key)
+        if track_id is None:
+            track_id = _best_label_track(label, label_to_track)
+        if track_id is None:
+            continue
+        idx = _mention_index(label, text)
+        if idx is None:
+            continue
+        candidate = (abs(idx - offset), -len(key), track_id)
+        if best is None or candidate < best:
+            best = candidate
+    return best[2] if best else None
 
 
 def _resolve_state_contradictions(events: list[PhysicalEvent]) -> list[PhysicalEvent]:
@@ -628,6 +697,12 @@ def _resolve_state_contradictions(events: list[PhysicalEvent]) -> list[PhysicalE
     not a threshold chosen here, and the seed state is required to be an explicit
     word in the text — an object with no stated state is never touched.
 
+    The seed is attributed to the object the state word *describes*, via
+    ``_state_subject``, not to the object the event's verb acts on. The first live
+    run of this rule corrected nothing precisely because those differ: the only
+    state word in the clip sat in a GRASP event that had bound the push chopper,
+    so the box's openness was recorded against the chopper.
+
     Runs of the same verb on the same object are corrected **together**. Treating
     them one at a time flips the state after each event, so the second OPEN would
     find a CLOSED box, read as satisfiable, and survive — the corrections would
@@ -639,6 +714,15 @@ def _resolve_state_contradictions(events: list[PhysicalEvent]) -> list[PhysicalE
     when it was said, so no correction is invisible in events.json.
     """
     ordered = sorted(range(len(events)), key=lambda i: events[i].start_sec)
+    # Every label some event in this episode managed to bind, so a state word can
+    # name an object the event it appears in is not about. Built once from the
+    # events themselves — no second resolution pass, and no access to ctx needed.
+    label_to_track: dict[str, int] = {}
+    for event in events:
+        label = event.attributes.get("object_label")
+        if label and event.object_track_id is not None:
+            label_to_track.setdefault(str(label).strip().lower(), event.object_track_id)
+
     # track_id -> (state, the phrase that said so, when it was said)
     state: dict[int, tuple[str, str, float]] = {}
     corrected = 0
@@ -651,10 +735,24 @@ def _resolve_state_contradictions(events: list[PhysicalEvent]) -> list[PhysicalE
 
         if verb not in _STATE_VERBS or obj is None:
             # Not a state verb, so it cannot contradict anything — but its text
-            # may still be the only place the object's state is ever stated.
+            # may still be the only place any object's state is ever stated, and
+            # not necessarily this event's object.
             seen = _state_evidence(event)
-            if seen and obj is not None:
-                state[obj] = (seen[0], seen[1], event.start_sec)
+            if seen:
+                seen_state, phrase, offset, text = seen
+                subject = _state_subject(
+                    text,
+                    offset,
+                    [*(event.attributes.get("objects") or []), *label_to_track],
+                    label_to_track,
+                )
+                # Falling back to the event's own object keeps the old behaviour
+                # whenever the text names nothing better; the subject lookup only
+                # ever overrides it when the text actually points elsewhere.
+                if subject is None:
+                    subject = obj
+                if subject is not None:
+                    state[subject] = (seen_state, phrase, event.start_sec)
             pos += 1
             continue
 

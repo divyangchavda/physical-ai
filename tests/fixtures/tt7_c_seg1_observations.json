@@ -1,0 +1,117 @@
+{
+  "_source": "Kaggle run C_seg1, 2026-09-01 08:41-08:44, commit c400ee8",
+  "_video": "tt7.mp4, 200 frames @ 30fps",
+  "_config": "config/kaggle_tt7_decoy_b.yaml with --set segment.max_segment_duration_sec=1.0 --set vlm.enabled=true --set vlm.backend=GEMINI --set vlm.model_name=gemini-3.1-flash-lite",
+  "_why": [
+    "This is the run where the state-contradiction rule fired on nothing, and it",
+    "is here because of what tests/fixtures/tt7_b_seg1_observations.json left out.",
+    "That fixture recorded the observation TEXT verbatim and the tests built their",
+    "events with object_track_id=6 throughout, which was an assumption. 21 tests",
+    "passed and production corrected zero events.",
+    "",
+    "The bindings are the thing that mattered. This run's own events.json shows",
+    "the GRASP at 0.00s bound track 3 (push chopper) -- and that event's text",
+    "holds the run's ONLY state word, 'an open cardboard box'. Seeded against the",
+    "event's own object, the box's openness was recorded against the chopper, so",
+    "the three OPEN events on track 6 had nothing to contradict.",
+    "",
+    "So object_track_id is recorded per observation below, read off events.json,",
+    "and no test here may substitute its own binding.",
+    "",
+    "Scored: 2 EXACT, 2 REVERSED, 3 OTHER; 7/7 WITHIN_TOL; 3/7 PRECISE.",
+    "Ground truth for the disputed stretch is FOLD 2.0-3.0 then CLOSE 3.0-4.0."
+  ],
+  "_fields": {
+    "verbatim": [
+      "segment_start_sec / segment_end_sec, raw_action, objects, state_change and",
+      "visible_facts are copied character for character from the printed",
+      "vlm_observations.json dump.",
+      "action, object_track_id and object_label are copied from the printed",
+      "events.json dump of the same run."
+    ],
+    "absent": [
+      "actor, active_hand, inference, uncertainty, confidence and the id fields",
+      "were not read back off the Kaggle box and are NOT reproduced here.",
+      "Nothing in this fixture may depend on them."
+    ]
+  },
+  "observations": [
+    {
+      "segment_start_sec": 0.0,
+      "segment_end_sec": 0.9523809523809524,
+      "raw_action": "holding a push chopper in the left hand and a cardboard box in the right hand",
+      "objects": ["push chopper", "cardboard box"],
+      "state_change": "UNKNOWN",
+      "visible_facts": "the person is holding a small kitchen appliance in their left hand and an open cardboard box in their right hand",
+      "action": "GRASP",
+      "object_track_id": 3,
+      "object_label": "push chopper"
+    },
+    {
+      "segment_start_sec": 0.9523809523809524,
+      "segment_end_sec": 1.9047619047619049,
+      "raw_action": "placing a plastic container into a cardboard box",
+      "objects": ["plastic container", "cardboard box"],
+      "state_change": "plastic container is now inside the cardboard box",
+      "visible_facts": "left hand holds a plastic container and moves it into the opening of a cardboard box",
+      "action": "INSERT",
+      "object_track_id": 6,
+      "object_label": "cardboard box"
+    },
+    {
+      "segment_start_sec": 1.9047619047619049,
+      "segment_end_sec": 2.857142857142857,
+      "raw_action": "opening the flaps of a cardboard box",
+      "objects": ["cardboard box", "vegetable chopper"],
+      "state_change": "box flaps are being unfolded",
+      "visible_facts": "hands are pulling the cardboard flaps of the box outward",
+      "action": "OPEN",
+      "object_track_id": 6,
+      "object_label": "cardboard box"
+    },
+    {
+      "segment_start_sec": 2.857142857142857,
+      "segment_end_sec": 3.8095238095238098,
+      "raw_action": "opening the top flaps of a cardboard box",
+      "objects": ["cardboard box", "push chopper"],
+      "state_change": "box flaps are being unfolded",
+      "visible_facts": "hands are gripping and pulling apart the top flaps of a cardboard box containing a push chopper",
+      "action": "OPEN",
+      "object_track_id": 6,
+      "object_label": "cardboard box"
+    },
+    {
+      "segment_start_sec": 3.8095238095238098,
+      "segment_end_sec": 4.761904761904762,
+      "raw_action": "opening the top flap of a cardboard box",
+      "objects": ["cardboard box", "push chopper"],
+      "state_change": "box flap is being lifted",
+      "visible_facts": "hands are gripping the top edges of the cardboard box and pulling the flap upwards",
+      "action": "OPEN",
+      "object_track_id": 6,
+      "object_label": "cardboard box"
+    },
+    {
+      "segment_start_sec": 4.761904761904762,
+      "segment_end_sec": 5.714285714285714,
+      "raw_action": "holding and presenting a box",
+      "objects": ["Push Chopper box"],
+      "state_change": "UNKNOWN",
+      "visible_facts": "the person's hands are positioned on the sides of the box, holding it steady in front of the camera",
+      "action": "GRASP",
+      "object_track_id": 13,
+      "object_label": "Push Chopper box"
+    },
+    {
+      "segment_start_sec": 5.714285714285714,
+      "segment_end_sec": 6.666666666666667,
+      "raw_action": "holding and rotating a box",
+      "objects": ["box of Divya product"],
+      "state_change": "UNKNOWN",
+      "visible_facts": "the person's right hand is gripping the side of a rectangular box and rotating it slightly",
+      "action": "GRASP",
+      "object_track_id": null,
+      "object_label": "box of Divya product"
+    }
+  ]
+}

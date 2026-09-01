@@ -12,6 +12,14 @@ the first fix considered here did not survive contact with it: adding
 contradict, because all three OPEN answers describe the transition progressively
 ("flaps are being unfolded", "flap is being lifted") and never name the closed
 state at all.
+
+**The bindings in this file are synthetic.** That run's ``events.json`` was lost
+to a kernel restart, so every event here is built with ``object_track_id=6``,
+which is an assumption and not a measurement — and it is exactly the assumption
+that let this file pass while the rule corrected nothing on the next live run.
+Object attribution is therefore tested in ``test_s07_state_subject.py`` against
+``tt7_c_seg1_observations.json``, which records the real bindings. What this file
+tests is the state machine: which verb flips, when, and how runs are grouped.
 """
 from __future__ import annotations
 
@@ -36,6 +44,17 @@ FIXTURE = (
 # OPEN events were scored against cardboard-box labels (FOLD, CLOSE, GRASP), so
 # they resolved the same object.
 BOX = 6
+
+
+def _seed(event: PhysicalEvent) -> tuple[str, str] | None:
+    """The state and phrase from ``_state_evidence``, dropping its offset/text.
+
+    Those two exist only so ``_state_subject`` can decide which object is meant,
+    which is a separate question from whether a state was stated at all.
+    """
+    found = _state_evidence(event)
+    return None if found is None else (found[0], found[1])
+
 
 
 @pytest.fixture(scope="module")
@@ -110,7 +129,7 @@ def test_no_single_answer_contradicts_itself(run_observations):
 def test_the_only_state_seed_in_the_run_is_the_first_observation(run_observations):
     """One explicit state word in seven observations, and it is at 0.0s."""
     seeds = {
-        o["segment_start_sec"]: _state_evidence(
+        o["segment_start_sec"]: _seed(
             _event(ActionType.UNKNOWN, o["segment_start_sec"],
                    visible_facts=o["visible_facts"],
                    state_change=o["state_change"])
@@ -249,17 +268,17 @@ def test_a_progressive_verb_never_seeds_a_state():
     itself, and the first OPEN in any run would correct itself with no outside
     evidence at all.
     """
-    assert _state_evidence(
+    assert _seed(
         _event(ActionType.OPEN, 0.0, visible_facts="hands are opening the flaps")
     ) is None
-    assert _state_evidence(
+    assert _seed(
         _event(ActionType.OPEN, 0.0, state_change="the box is being opened")
     ) == ("OPEN", "opened")  # a completed past participle DOES state a state
 
 
 def test_text_naming_both_states_seeds_nothing():
     """Two states in one sentence must not be resolved by match order."""
-    assert _state_evidence(
+    assert _seed(
         _event(ActionType.GRASP, 0.0,
                visible_facts="a closed carton beside an open cardboard box")
     ) is None
@@ -269,7 +288,7 @@ def test_a_progressive_verb_does_not_cancel_a_stated_state():
     """"closing the open box" states that the box IS open and that closing is
     in flight. Only the state word counts, which is the correct reading and the
     reason the both-states guard above needs two real state words to fire."""
-    assert _state_evidence(
+    assert _seed(
         _event(ActionType.GRASP, 0.0, visible_facts="closing the open box")
     ) == ("OPEN", "open")
 
@@ -278,7 +297,7 @@ def test_the_verb_under_test_cannot_seed_its_own_state():
     """raw_action is excluded, so a CLOSE cannot veto itself."""
     event = _event(ActionType.CLOSE, 1.0)
     event.attributes["raw_action"] = "closed the cardboard box"
-    assert _state_evidence(event) is None
+    assert _seed(event) is None
     assert _resolve_state_contradictions([event])[0].action is ActionType.CLOSE
 
 
@@ -286,7 +305,7 @@ def test_inference_is_not_evidence():
     """The prompt defines inference as reasoning beyond what is visible."""
     event = _event(ActionType.GRASP, 0.0)
     event.attributes["inference"] = "the box is probably closed"
-    assert _state_evidence(event) is None
+    assert _seed(event) is None
 
 
 def test_events_out_of_time_order_are_still_read_in_time_order():
