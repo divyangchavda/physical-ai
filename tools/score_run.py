@@ -20,6 +20,19 @@ longest", and picking the best-matching action would flatter the score. So an
 event covering more than one action is marked AMBIGUOUS, and its verdict is an
 explicit **upper bound**: EXACT means the emitted action matched *at least one*
 of the actions it covers. Treat every accuracy figure here as a ceiling.
+
+*Coverage and tolerance are separate questions.* This tool used to widen the
+event span by the label file's ``timing_tolerance_sec`` on BOTH sides before
+asking what it covered, which conflated two different things and made the
+ambiguity partly self-inflicted: on tt7 (tolerance 1.0s) a correctly-timed
+0.95s event was tested as a 2.95s span, so it swept in the labelled actions on
+either side and could never be reported PRECISE no matter how well it was timed.
+Coverage is now raw overlap. Tolerance answers the separate question of whether a
+covered action's *boundaries* line up, reported per event as WITHIN_TOL or
+OFF_BY. Tolerance still widens the search, but only as a fallback when raw
+overlap finds nothing at all — an event that misses a boundary by 0.1s should be
+scored against the action next to it rather than called UNMATCHED — and that case
+prints as NEAR so it is never mistaken for real overlap.
 """
 from __future__ import annotations
 
@@ -143,6 +156,11 @@ def assess(event: dict, actions: list[dict], tolerance: float) -> dict:
     Never picks one action out of several. When the event's span covers many
     labelled actions, that is the finding, and the verdict is a best case over
     everything covered.
+
+    Coverage is raw overlap. ``tolerance`` is used for two narrower jobs: it
+    reports whether a covered action's boundaries line up with the event's, and
+    it widens the search only when raw overlap found nothing. See the module
+    docstring for why the two were separated.
     """
     attrs = event.get("attributes") or {}
     label = attrs.get("object_label")
@@ -151,9 +169,20 @@ def assess(event: dict, actions: list[dict], tolerance: float) -> dict:
     e2 = float(event.get("end_sec") or 0.0)
 
     covered = [
-        a for a in actions
-        if _overlap(e1 - tolerance, e2 + tolerance, a["start_sec"], a["end_sec"]) > 0
+        a for a in actions if _overlap(e1, e2, a["start_sec"], a["end_sec"]) > 0
     ]
+    # Only when nothing genuinely overlaps: an event whose span sits just outside
+    # a labelled action is a timing miss against THAT action, not an unmatched
+    # event. Flagged so the two cases stay distinguishable in the output.
+    basis = "OVERLAP"
+    if not covered:
+        covered = [
+            a for a in actions
+            if _overlap(e1 - tolerance, e2 + tolerance,
+                        a["start_sec"], a["end_sec"]) > 0
+        ]
+        basis = "NEAR"
+
     # Narrow by object when the event resolved one and it matches something.
     # Either role counts — see _names_either_role for why testing only 'object'
     # dropped correct answers.
@@ -162,7 +191,8 @@ def assess(event: dict, actions: list[dict], tolerance: float) -> dict:
 
     if not pool:
         return {"verdict": "UNMATCHED", "direction": "N/A", "covered": [],
-                "narrowed_by_object": False, "got": got}
+                "narrowed_by_object": False, "got": got, "basis": "NONE",
+                "timing": "N/A", "boundary_error": None}
 
     truths = [a["action"] for a in pool]
     if got in truths:
@@ -173,6 +203,19 @@ def assess(event: dict, actions: list[dict], tolerance: float) -> dict:
         verdict = "NOT_IN_VOCABULARY"
     else:
         verdict = "OTHER"
+
+    # Boundary agreement, which is the only thing tolerance now decides. Measured
+    # against the action the verdict was earned on — the one sharing the emitted
+    # verb, else the largest overlap — because "how far off was the timing" is
+    # only meaningful about the action the event claims to be describing.
+    scored_on = next(
+        (a for a in pool if a["action"] == got),
+        max(pool, key=lambda a: _overlap(e1, e2, a["start_sec"], a["end_sec"])),
+    )
+    boundary_error = max(
+        abs(e1 - scored_on["start_sec"]), abs(e2 - scored_on["end_sec"])
+    )
+    timing = "WITHIN_TOL" if boundary_error <= tolerance else "OUTSIDE_TOL"
 
     # Direction: compare against the labelled direction of whichever covered
     # action shares the emitted verb, else the first covered action that states
@@ -194,7 +237,39 @@ def assess(event: dict, actions: list[dict], tolerance: float) -> dict:
         direction = "OTHER"
 
     return {"verdict": verdict, "direction": direction, "covered": pool,
-            "narrowed_by_object": bool(on_object), "got": got}
+            "narrowed_by_object": bool(on_object), "got": got, "basis": basis,
+            "timing": timing, "boundary_error": boundary_error,
+            "scored_on": scored_on}
+
+
+def stub_observations(run: Path) -> list[dict]:
+    """SUCCESS observations in *run* that came from the stub VLM adapter.
+
+    src/models/local_vlm.py is a placeholder that fabricates a fixed answer
+    ("picked up the cup") without opening the video, and config/default.yaml's
+    vlm block is backend LOCAL_MODEL / model_name "stub". A config that turns the
+    VLM on without naming a backend therefore falls through to the stub, s06
+    reports "1 observations: 1 SUCCESS in 0.000s", and this scorer read the
+    fabricated answer and reported EXACT with direction=SAME. That happened, and
+    nothing in the output said the video had not been looked at.
+
+    So the stub is detected from the run's own record rather than trusted not to
+    appear: whatever the config said, vlm_observations.json states the backend and
+    model that actually answered.
+    """
+    path = run / "vlm_observations.json"
+    if not path.is_file():
+        return []
+    try:
+        observations = _load(path)
+    except (json.JSONDecodeError, OSError):
+        return []
+    return [
+        o for o in observations
+        if o.get("status") == "SUCCESS"
+        and ((o.get("backend") or "").upper() == "LOCAL_MODEL"
+             or (o.get("model_name") or "").lower() == "stub")
+    ]
 
 
 def main() -> int:
@@ -204,6 +279,29 @@ def main() -> int:
     args = ap.parse_args()
 
     run = Path(args.run)
+
+    # Before anything is measured. A score computed from fabricated observations
+    # is worse than no score, so this refuses rather than annotating.
+    stubs = stub_observations(run)
+    if stubs:
+        print("=" * 72)
+        print("REFUSING TO SCORE: this run's observations came from the STUB VLM.")
+        print("=" * 72)
+        for o in stubs[:5]:
+            print(f"  {o.get('observation_id')}  backend={o.get('backend')!r} "
+                  f"model_name={o.get('model_name')!r}")
+            print(f"    raw_action={o.get('raw_action')!r} "
+                  f"objects={o.get('objects')!r}")
+        if len(stubs) > 5:
+            print(f"  ... and {len(stubs) - 5} more")
+        print(f"\n{len(stubs)} fabricated SUCCESS observation(s). src/models/"
+              "local_vlm.py returns a fixed answer without reading the video, so "
+              "any\nnumber below would describe the stub, not the pipeline.")
+        print("Re-run with an explicit backend, e.g.:")
+        print("  --set vlm.enabled=true --set vlm.backend=GEMINI "
+              "--set vlm.model_name=gemini-3.1-flash-lite")
+        return 2
+
     truth = _load(Path(args.truth))
     events = _load(run / "events.json")
     tolerance = float(truth.get("timing_tolerance_sec", 1.0))
@@ -218,31 +316,41 @@ def main() -> int:
         print(f"recall ceiling       : {len(events)}/{len(actions)} = "
               f"{100.0 * len(events) / len(actions):.0f}%"
               f"   (one event can name at most one action)")
+    print(f"timing tolerance     : {tolerance:.2f}s"
+          f"   (boundary agreement only; coverage is raw overlap)")
     print("NOTE: every accuracy below is an UPPER BOUND -- an event spanning a "
           "whole\n      segment is credited if it matched ANY action it covers.")
 
     verdicts: dict[str, int] = {}
     directions: dict[str, int] = {}
+    timings: dict[str, int] = {}
     covered_keys: set[tuple[int, int]] = set()
     n_ambiguous = 0
+    n_precise = 0
 
     print("\n--- events ---")
     for ev in events:
         r = assess(ev, actions, tolerance)
         verdicts[r["verdict"]] = verdicts.get(r["verdict"], 0) + 1
         directions[r["direction"]] = directions.get(r["direction"], 0) + 1
+        timings[r["timing"]] = timings.get(r["timing"], 0) + 1
         span = f"[{ev.get('start_sec')}, {ev.get('end_sec')}]"
         if not r["covered"]:
             print(f"  {r['got']:<9} {span:<18} -> nothing labelled overlaps this span")
             continue
         for a in r["covered"]:
             covered_keys.add((a["copy"], a["order"]))
-        attribution = "PRECISE" if len(r["covered"]) == 1 else f"AMBIGUOUS x{len(r['covered'])}"
-        names = ",".join(a["action"] for a in r["covered"])
-        print(f"  {r['got']:<9} {span:<18} -> {r['verdict']:<18} "
-              f"direction={r['direction']:<9} {attribution:<14} covers[{names}]")
-        if len(r["covered"]) > 1:
+        if len(r["covered"]) == 1:
+            attribution = "PRECISE" if r["basis"] == "OVERLAP" else "NEAR"
+            n_precise += 1 if r["basis"] == "OVERLAP" else 0
+        else:
+            attribution = f"AMBIGUOUS x{len(r['covered'])}"
             n_ambiguous += 1
+        names = ",".join(a["action"] for a in r["covered"])
+        err = r["boundary_error"]
+        print(f"  {r['got']:<9} {span:<18} -> {r['verdict']:<18} "
+              f"direction={r['direction']:<9} {attribution:<14} "
+              f"off_by={err:.2f}s vs tol {tolerance:.2f}s covers[{names}]")
 
     print("\n--- action verdicts (upper bound) ---")
     for k in ("EXACT", "REVERSED", "OTHER", "NOT_IN_VOCABULARY", "UNMATCHED"):
@@ -252,7 +360,12 @@ def main() -> int:
     for k in ("SAME", "REVERSED", "OTHER", "N/A"):
         if k in directions:
             print(f"  {k:<18} {directions[k]}")
+    print(f"--- boundary agreement (|start-start|, |end-end| vs {tolerance:.2f}s) ---")
+    for k in ("WITHIN_TOL", "OUTSIDE_TOL", "N/A"):
+        if k in timings:
+            print(f"  {k:<18} {timings[k]}")
     print("--- attribution ---")
+    print(f"  events covering exactly 1 labelled action : {n_precise}/{len(events)}")
     print(f"  events covering >1 labelled action : {n_ambiguous}/{len(events)}")
     print(f"  labelled actions inside some event span : {len(covered_keys)}/{len(actions)}")
     never: dict[str, int] = {}

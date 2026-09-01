@@ -175,7 +175,185 @@ def test_a_whole_clip_event_covers_every_tt7_action(tt7_actions):
     segment's bounds, so one event covers all seven labelled actions and every
     verdict is an upper bound over the whole clip. No accuracy number means
     anything until this stops being true.
+
+    Still 7 after coverage was changed to raw overlap: the whole clip genuinely
+    overlaps all seven. That is the point — the widening was never what made this
+    case ambiguous, it was what made the *correctly timed* cases below ambiguous.
     """
     ev = _event("INSERT", 0.0, 6.6667, None)
     result = score_run.assess(ev, tt7_actions, tolerance=1.0)
     assert len(result["covered"]) == 7
+    assert result["basis"] == "OVERLAP"
+
+
+# ──────────────────────────────────────────── coverage vs tolerance (item 1)
+def test_tolerance_no_longer_widens_what_an_event_covers(tt7_actions):
+    """The self-inflicted ambiguity, as arithmetic.
+
+    tt7's tolerance is 1.0s. An event timed exactly on the labelled INSERT
+    (1.0-2.0) used to be tested as the span [0.0, 3.0], which swept in PLACE,
+    PICK and FOLD — so a perfectly timed event reported AMBIGUOUS x4 and nothing
+    could ever be PRECISE. Coverage is raw overlap now.
+    """
+    ev = _event("INSERT", 1.0, 2.0, None)
+    result = score_run.assess(ev, tt7_actions, tolerance=1.0)
+    assert [a["action"] for a in result["covered"]] == ["INSERT"]
+    assert result["basis"] == "OVERLAP"
+    assert result["verdict"] == "EXACT"
+
+
+def test_the_widened_span_would_have_covered_four(tt7_actions):
+    """States what the old behaviour did, so the fix is not taken on faith.
+
+    Four, not five: the widened span ends exactly at CLOSE's 3.0 start, and
+    _overlap requires more than zero.
+    """
+    widened = [
+        a for a in tt7_actions
+        if score_run._overlap(1.0 - 1.0, 2.0 + 1.0, a["start_sec"], a["end_sec"]) > 0
+    ]
+    assert [a["action"] for a in widened] == ["PLACE", "PICK", "INSERT", "FOLD"]
+
+
+def test_a_real_run_3_window_now_overlaps_two_labels_not_four(tt7_actions):
+    """Verbatim from the 7-segment Kaggle run: max_segment_duration_sec=1.0.
+
+    That run's first window was [0.0, 0.9523809523809524]. Under the widened span
+    it covered PLACE, PICK, INSERT and FOLD; it genuinely overlaps two. Scored
+    with no object_label so this measures coverage alone.
+    """
+    ev = _event("GRASP", 0.0, 0.9523809523809524, None)
+    result = score_run.assess(ev, tt7_actions, tolerance=1.0)
+    assert [a["action"] for a in result["covered"]] == ["PLACE", "PICK"]
+
+
+def test_object_narrowing_can_take_that_window_to_precise(tt7_actions):
+    """And with a resolved object it reaches one action — the first PRECISE.
+
+    'cardboard box' is PLACE's object; PICK's object is the chopper and its
+    target the table, so PICK leaves the pool. Under the old widening this event
+    could not be PRECISE no matter what it resolved.
+    """
+    ev = _event("GRASP", 0.0, 0.9523809523809524, "cardboard box")
+    result = score_run.assess(ev, tt7_actions, tolerance=1.0)
+    assert [a["action"] for a in result["covered"]] == ["PLACE"]
+    assert result["basis"] == "OVERLAP"
+    assert result["narrowed_by_object"] is True
+
+
+def test_an_event_just_outside_a_label_is_near_not_unmatched(tt7_actions):
+    """Tolerance still widens the SEARCH, and says so when it had to.
+
+    An event 0.1s past the end of the last label is a timing miss against that
+    label, not an event about nothing. Reported as NEAR so it cannot be read as
+    real overlap.
+    """
+    ev = _event("MOVE", 6.7, 7.2, "cardboard box")
+    result = score_run.assess(ev, tt7_actions, tolerance=1.0)
+    assert result["basis"] == "NEAR"
+    assert [a["action"] for a in result["covered"]] == ["MOVE"]
+    assert result["verdict"] == "EXACT"
+
+
+def test_near_still_becomes_unmatched_beyond_tolerance(tt7_actions):
+    ev = _event("MOVE", 50.0, 51.0, "cardboard box")
+    result = score_run.assess(ev, tt7_actions, tolerance=1.0)
+    assert result["verdict"] == "UNMATCHED"
+    assert result["basis"] == "NONE"
+
+
+def test_boundary_error_is_measured_against_the_action_scored_on(tt7_actions):
+    """Tolerance's remaining job: how far off the boundaries were."""
+    ev = _event("INSERT", 1.2, 2.1, None)
+    result = score_run.assess(ev, tt7_actions, tolerance=1.0)
+    assert result["scored_on"]["action"] == "INSERT"
+    assert result["boundary_error"] == pytest.approx(0.2)
+    assert result["timing"] == "WITHIN_TOL"
+
+
+def test_a_whole_clip_event_is_outside_tolerance_on_its_boundaries(tt7_actions):
+    """The whole-clip event matches INSERT's verb but not its boundaries.
+
+    Coverage says AMBIGUOUS x7 and boundary agreement says OUTSIDE_TOL. Two
+    independent statements about the same event, which is why they were split.
+    """
+    ev = _event("INSERT", 0.0, 6.6667, None)
+    result = score_run.assess(ev, tt7_actions, tolerance=1.0)
+    assert result["scored_on"]["action"] == "INSERT"
+    assert result["boundary_error"] == pytest.approx(4.6667)
+    assert result["timing"] == "OUTSIDE_TOL"
+
+
+# ──────────────────────────────────────────────────── the stub guard (item 3)
+def _write_run(tmp_path: Path, observations: list[dict]) -> Path:
+    run = tmp_path / "run_x"
+    run.mkdir()
+    (run / "events.json").write_text("[]", encoding="utf-8")
+    (run / "vlm_observations.json").write_text(
+        json.dumps(observations), encoding="utf-8"
+    )
+    return run
+
+
+def test_the_stub_run_that_scored_exact_is_now_refused(tmp_path):
+    """Verbatim from the run that fooled this scorer.
+
+    config/kaggle_tt7_decoy_b.yaml sets vlm.enabled=false and names no backend, so
+    --set vlm.enabled=true fell through to config/default.yaml's LOCAL_MODEL/stub.
+    s06 reported "1 observations: 1 SUCCESS in 0.000s" and this file printed
+    1 EXACT with direction=SAME for an answer about a cup that is not in the video.
+    """
+    run = _write_run(tmp_path, [{
+        "observation_id": "obs_deadbeef",
+        "status": "SUCCESS",
+        "backend": "LOCAL_MODEL",
+        "model_name": "stub",
+        "raw_action": "picked up the cup",
+        "objects": ["white cup"],
+    }])
+    stubs = score_run.stub_observations(run)
+    assert len(stubs) == 1
+
+
+def test_the_stub_guard_makes_main_exit_non_zero(tmp_path, monkeypatch, capsys):
+    run = _write_run(tmp_path, [{
+        "observation_id": "obs_deadbeef", "status": "SUCCESS",
+        "backend": "LOCAL_MODEL", "model_name": "stub",
+        "raw_action": "picked up the cup", "objects": ["white cup"],
+    }])
+    monkeypatch.setattr(
+        "sys.argv",
+        ["score_run.py", "--run", str(run), "--truth", str(TRUTH)],
+    )
+    assert score_run.main() == 2
+    out = capsys.readouterr().out
+    assert "REFUSING TO SCORE" in out
+    # And no score at all — a fabricated number is worse than none.
+    assert "recall ceiling" not in out
+
+
+def test_a_real_gemini_run_is_not_flagged(tmp_path):
+    run = _write_run(tmp_path, [{
+        "observation_id": "obs_1", "status": "SUCCESS",
+        "backend": "GEMINI", "model_name": "gemini-3.1-flash-lite",
+        "raw_action": "placing the push chopper into the cardboard box",
+    }])
+    assert score_run.stub_observations(run) == []
+
+
+def test_a_skipped_stub_observation_is_not_flagged(tmp_path):
+    """vlm.enabled=false writes SKIPPED records with backend NONE. Those are
+    honest and must not block scoring a run that never claimed to see anything."""
+    run = _write_run(tmp_path, [{
+        "observation_id": "obs_1", "status": "SKIPPED",
+        "backend": "NONE", "model_name": "NONE",
+    }])
+    assert score_run.stub_observations(run) == []
+
+
+def test_a_run_without_vlm_observations_is_not_flagged(tmp_path):
+    """Older run directories and replay fixtures must still be scorable."""
+    run = tmp_path / "bare"
+    run.mkdir()
+    (run / "events.json").write_text("[]", encoding="utf-8")
+    assert score_run.stub_observations(run) == []
