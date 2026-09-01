@@ -128,6 +128,30 @@ def score_direction(got_verb: str, template: str) -> str:
     return "OTHER"
 
 
+def interleave_by_verb(clips: list[dict]) -> list[dict]:
+    """Reorder so every prefix is as verb-balanced as the whole list is.
+
+    ``tools/ssv2_bundle.py`` writes truth.json grouped by verb, which made the
+    first five-clip batch five CLOSE clips and told us nothing about the other
+    ten verbs. Order is a property of the run, not of the bundle, so it is fixed
+    here rather than by re-uploading the dataset.
+
+    Round-robin over the verbs, each verb keeping its own file order, so the
+    result is deterministic and interrupting the run after any number of clips
+    still leaves a readable per-verb table.
+    """
+    by_verb: dict[str, list[dict]] = defaultdict(list)
+    for clip in clips:
+        by_verb[clip["action"]].append(clip)
+    verbs = sorted(by_verb)
+    out: list[dict] = []
+    for row in range(max(len(v) for v in by_verb.values()) if by_verb else 0):
+        for verb in verbs:
+            if row < len(by_verb[verb]):
+                out.append(by_verb[verb][row])
+    return out
+
+
 def run_one(clip: dict, bundle: Path, config: Path, out: Path,
             python: str) -> dict:
     """Run the pipeline on one clip and read its verdict off events.json."""
@@ -200,6 +224,31 @@ def run_one(clip: dict, bundle: Path, config: Path, out: Path,
         verb_source=(chosen.get("attributes") or {}).get("verb_source") if chosen else None,
     )
     return record
+
+
+def merge_results(path: Path, records: list[dict]) -> list[dict]:
+    """This invocation's records folded into whatever a prior one already wrote.
+
+    Without this, resuming with ``--skip-done`` would report only the clips run
+    since the interruption and overwrite the rest — a 195-clip run that died at
+    clip 180 would come back as a 15-clip measurement. Keyed on ``clip_id``, and
+    a fresh record replaces an older one for the same clip so a re-run of a
+    single clip is how you correct it.
+
+    A results.json that cannot be parsed is ignored rather than fatal: the run
+    that just cost an hour of GPU must not be lost to a truncated file from a
+    previous crash.
+    """
+    existing: dict[str, dict] = {}
+    if path.is_file():
+        try:
+            prior = json.loads(path.read_text(encoding="utf-8")).get("results", [])
+            existing = {r["clip_id"]: r for r in prior}
+        except (json.JSONDecodeError, OSError, KeyError, TypeError) as exc:
+            print(f"warning: ignoring unreadable {path}: {exc}")
+    for record in records:
+        existing[record["clip_id"]] = record
+    return list(existing.values())
 
 
 def report(records: list[dict]) -> None:
@@ -280,19 +329,40 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=0,
                         help="how many clips to run, 0 = all remaining")
     parser.add_argument("--python", default=sys.executable)
+    parser.add_argument("--order", choices=("interleave", "file"),
+                        default="interleave",
+                        help="interleave (default) round-robins the verbs so a "
+                             "partial run is still verb-balanced; file keeps "
+                             "truth.json's own verb-grouped order")
+    parser.add_argument("--skip-done", action="store_true",
+                        help="skip clips that already have an events.json under "
+                             "--out, so an interrupted run can be resumed "
+                             "without paying for the finished clips again")
     args = parser.parse_args()
 
     manifest = json.loads(
         (args.bundle / "truth.json").read_text(encoding="utf-8")
     )
     clips = manifest["clips"]
+    if args.order == "interleave":
+        clips = interleave_by_verb(clips)
     end = len(clips) if args.limit <= 0 else min(len(clips), args.start + args.limit)
     selected = clips[args.start:end]
+    if args.skip_done:
+        before = len(selected)
+        selected = [
+            c for c in selected
+            if not (args.out / "runs" / c["clip_id"] / "events.json").exists()
+        ]
+        print(f"--skip-done: {before - len(selected)} clip(s) already have "
+              f"events.json and are skipped")
     if not selected:
-        raise SystemExit(f"no clips in range [{args.start}, {end}) of {len(clips)}")
+        raise SystemExit(f"no clips to run in range [{args.start}, {end}) "
+                         f"of {len(clips)}")
 
     print(f"bundle : {args.bundle}")
     print(f"config : {args.config}")
+    print(f"order  : {args.order}")
     print(f"clips  : {len(selected)} of {len(clips)} "
           f"(index {args.start}..{end - 1})")
     args.out.mkdir(parents=True, exist_ok=True)
@@ -307,14 +377,15 @@ def main() -> int:
               f"want {clip['action']:<8} got {str(record['got']):<8} "
               f"{record['seconds']:>5.1f}s  {clip['label'][:44]}")
 
+    merged = merge_results(args.out / "results.json", records)
     (args.out / "results.json").write_text(
         json.dumps({"_config": str(args.config),
                     "_bundle": str(args.bundle),
                     "_counts": manifest.get("_counts"),
-                    "results": records}, indent=2),
+                    "results": merged}, indent=2),
         encoding="utf-8",
     )
-    report(records)
+    report(merged)
     print(f"\nresults -> {args.out / 'results.json'}")
     return 0
 

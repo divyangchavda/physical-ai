@@ -21,10 +21,99 @@ sys.path.insert(0, str(REPO / "tools"))
 from ssv2_eval import (  # noqa: E402
     BASE_CLASSES,
     build_prompt,
+    interleave_by_verb,
+    merge_results,
     primary_event,
     score_direction,
     template_direction,
 )
+
+
+# ───────────────────────────────────────────────── run order, so a partial run reads
+def _clips(spec: list[tuple[str, int]]) -> list[dict]:
+    """``[("CLOSE", 3), ("OPEN", 2)]`` -> a verb-grouped clip list like the bundle's."""
+    return [
+        {"clip_id": f"{verb}{i}", "action": verb}
+        for verb, count in spec for i in range(count)
+    ]
+
+
+def test_a_short_run_covers_every_verb_instead_of_only_the_first():
+    """The flaw the first live batch exposed: five clips, all of them CLOSE.
+
+    truth.json is grouped by verb, so ``--limit 5`` measured one verb and said
+    nothing about the other ten.
+    """
+    grouped = _clips([("CLOSE", 3), ("OPEN", 3), ("PUSH", 3)])
+    assert {c["action"] for c in grouped[:3]} == {"CLOSE"}
+    assert {c["action"] for c in interleave_by_verb(grouped)[:3]} == (
+        {"CLOSE", "OPEN", "PUSH"}
+    )
+
+
+def test_no_clip_is_lost_or_duplicated_by_reordering():
+    grouped = _clips([("CLOSE", 4), ("OPEN", 2), ("PUSH", 7)])
+    reordered = interleave_by_verb(grouped)
+    assert sorted(c["clip_id"] for c in reordered) == sorted(
+        c["clip_id"] for c in grouped
+    )
+    assert len(reordered) == len(grouped)
+
+
+def test_a_verb_that_runs_out_does_not_stall_the_others():
+    """Verb counts differ (CLOSE had 22 available against PLACE's 338), so the
+    shorter verbs simply drop out of later rounds."""
+    reordered = interleave_by_verb(_clips([("CLOSE", 1), ("PUSH", 3)]))
+    assert [c["clip_id"] for c in reordered] == ["CLOSE0", "PUSH0", "PUSH1", "PUSH2"]
+
+
+def test_each_verb_keeps_its_own_order_so_the_draw_stays_deterministic():
+    reordered = interleave_by_verb(_clips([("CLOSE", 3), ("PUSH", 3)]))
+    assert [c["clip_id"] for c in reordered if c["action"] == "CLOSE"] == (
+        ["CLOSE0", "CLOSE1", "CLOSE2"]
+    )
+
+
+def test_reordering_an_empty_list_is_not_an_error():
+    assert interleave_by_verb([]) == []
+
+
+# ──────────────────────────────────────────── resuming must not shrink the result
+def _result(clip_id: str, verdict: str = "TOP1") -> dict:
+    return {"clip_id": clip_id, "truth_action": "CLOSE", "verdict": verdict,
+            "got": "CLOSE", "exit_code": 0, "seconds": 1.0, "direction": "N/A"}
+
+
+def test_resuming_keeps_the_clips_a_previous_run_already_paid_for(tmp_path):
+    """A 195-clip run that dies at clip 180 must not come back as a 15-clip
+    measurement."""
+    path = tmp_path / "results.json"
+    path.write_text('{"results": [{"clip_id": "a", "verdict": "TOP1"}]}',
+                    encoding="utf-8")
+    merged = merge_results(path, [_result("b")])
+    assert sorted(r["clip_id"] for r in merged) == ["a", "b"]
+
+
+def test_a_rerun_of_one_clip_replaces_its_old_record(tmp_path):
+    path = tmp_path / "results.json"
+    path.write_text('{"results": [{"clip_id": "a", "verdict": "MISS"}]}',
+                    encoding="utf-8")
+    merged = merge_results(path, [_result("a", verdict="TOP1")])
+    assert len(merged) == 1
+    assert merged[0]["verdict"] == "TOP1"
+
+
+def test_no_prior_file_is_the_normal_first_run(tmp_path):
+    merged = merge_results(tmp_path / "nothing.json", [_result("a")])
+    assert [r["clip_id"] for r in merged] == ["a"]
+
+
+def test_an_unreadable_prior_file_does_not_discard_this_runs_work(tmp_path):
+    """An hour of GPU must not be lost to a truncated file from an earlier crash."""
+    path = tmp_path / "results.json"
+    path.write_text("{ truncated", encoding="utf-8")
+    merged = merge_results(path, [_result("a")])
+    assert [r["clip_id"] for r in merged] == ["a"]
 
 
 # ───────────────────────────────────────────────────────── the per-clip prompt
