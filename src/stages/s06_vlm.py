@@ -109,7 +109,7 @@ def extract_json(text: str) -> str:
 
 
 def _absolute_timing(
-    record: dict, seg_start: float, seg_end: float
+    record: dict, seg_start: float, seg_end: float, fps: float | None = None
 ) -> tuple[float | None, float | None, str | None]:
     """Convert the VLM's relative offsets to absolute seconds.
 
@@ -137,8 +137,18 @@ def _absolute_timing(
     handles -- s07's _timing_precision reports SEGMENT and the event falls back
     to the segment's own bounds.
 
-    The invariant itself is left alone: downstream stages read it, and s06 owns
-    the conversion, so s06 owns the offsets that do not fit.
+    One exception, and only one: a bound overshooting by less than the duration of
+    a single frame. tt7 is 200 frames at 30fps, so its one whole-clip segment ends
+    at 6.666666666666667s; the model, told the clip was "6.67" seconds long by
+    _render_prompt's own ``.2f`` rounding, answered 6.67 and the answer was thrown
+    away for being 0.0033s past the end. It was the correct answer, rejected by the
+    rounding in the question. Within ``1 / fps`` there is no frame to distinguish
+    the two values -- the overshoot cannot name a frame the segment does not
+    contain -- so the bound is snapped to the segment edge and the snap is
+    reported. Beyond one frame period the reasoning above still applies and the
+    timing is still dropped: this widens nothing, it only stops a sub-frame
+    rounding artifact from costing a whole observation's timing. ``fps`` comes
+    from s01's measured video metadata; with no fps supplied nothing is snapped.
     """
     raw_start, raw_end = record.get("start_time_sec"), record.get("end_time_sec")
     if raw_start is None and raw_end is None:
@@ -156,6 +166,30 @@ def _absolute_timing(
             f"- timing dropped, raw_action kept"
         )
 
+    frame_sec = 1.0 / fps if fps and fps > 0.0 else 0.0
+    snapped: list[str] = []
+
+    def _snap(name: str, value: float | None) -> float | None:
+        """Pull *value* onto a segment edge it overshoots by under one frame."""
+        if value is None or frame_sec <= 0.0:
+            return value
+        for edge in (seg_start, seg_end):
+            if value != edge and abs(value - edge) <= frame_sec:
+                # Only ever pulls a value INTO the segment; a bound already
+                # inside it is left exactly as the model reported it.
+                if (value < seg_start and edge == seg_start) or (
+                    value > seg_end and edge == seg_end
+                ):
+                    snapped.append(
+                        f"{name} {value:.6f} -> {edge:.6f} "
+                        f"(within one frame, {frame_sec:.6f}s)"
+                    )
+                    return edge
+        return value
+
+    start = _snap("start_time_sec", start)
+    end = _snap("end_time_sec", end)
+
     outside = [
         (name, value)
         for name, value in (("start_time_sec", start), ("end_time_sec", end))
@@ -167,13 +201,16 @@ def _absolute_timing(
         outside.append(("start_time_sec > end_time_sec", start))
 
     if outside:
-        detail = ", ".join(f"{name}={value:.2f}" for name, value in outside)
+        # Printed at full precision. At 2 decimals the tt7 rejection read
+        # "end_time_sec=6.67 outside segment [0.00, 6.67]", which is a
+        # self-contradiction: the number that caused it was invisible.
+        detail = ", ".join(f"{name}={value:.6f}" for name, value in outside)
         return None, None, (
-            f"{detail} outside segment [{seg_start:.2f}, {seg_end:.2f}] "
+            f"{detail} outside segment [{seg_start:.6f}, {seg_end:.6f}] "
             f"- timing dropped, raw_action kept"
         )
 
-    return start, end, None
+    return start, end, "; ".join(snapped) if snapped else None
 
 
 def _write_output(ctx: PipelineContext, status: str = "OK") -> None:
@@ -328,6 +365,26 @@ def run(ctx: PipelineContext) -> PipelineStageStatus:
 
     # Initialize Backend
     if ctx.config.vlm.backend == "LOCAL_MODEL":
+        # config/default.yaml ships backend LOCAL_MODEL / model_name "stub", and
+        # src/models/local_vlm.py fabricates a fixed answer without opening the
+        # video. A config that sets vlm.enabled=true without naming a backend
+        # therefore produces confident nonsense in 0.000s, which a run of tt7 did
+        # — "picked up the cup", objects ["white cup"], and there is no cup in
+        # that video. It scored EXACT. Nothing objected, so this does.
+        if (ctx.config.vlm.model_name or "").lower() == "stub":
+            logger.warning(
+                "[%s] " + "=" * 60, STAGE,
+            )
+            logger.warning(
+                "[%s] vlm.enabled=true but backend=LOCAL_MODEL and "
+                "model_name='stub' — src/models/local_vlm.py is a PLACEHOLDER. "
+                "It fabricates an answer WITHOUT READING THE VIDEO. Every "
+                "observation below is fiction. Set vlm.backend explicitly "
+                "(e.g. GEMINI) if you meant to analyse the video.", STAGE,
+            )
+            logger.warning(
+                "[%s] " + "=" * 60, STAGE,
+            )
         vlm = LocalVLM(model_name=ctx.config.vlm.model_name)
     elif ctx.config.vlm.backend == "GEMINI":
         vlm = GeminiVLM(
@@ -342,7 +399,11 @@ def run(ctx: PipelineContext) -> PipelineStageStatus:
         )
         
     ctx.vlm_observations = []
-    
+
+    # Measured by s01 from the container. Used only to size the sub-frame snap in
+    # _absolute_timing; absent metadata means no snapping, never a guessed rate.
+    fps = ctx.video_metadata.fps if ctx.video_metadata else None
+
     for seg in ctx.candidate_segments:
         # The model is told this clip's length, so the prompt is per segment.
         prompt_with_test_flags = _render_prompt(seg.end_sec - seg.start_sec)
@@ -386,7 +447,7 @@ def run(ctx: PipelineContext) -> PipelineStageStatus:
                     # validation. Offsets that do not fit the clip cost their
                     # own observation the timing, never the whole answer.
                     start_abs, end_abs, timing_warning = _absolute_timing(
-                        data, seg.start_sec, seg.end_sec
+                        data, seg.start_sec, seg.end_sec, fps
                     )
                     if timing_warning:
                         logger.warning(

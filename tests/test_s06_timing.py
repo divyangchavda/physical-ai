@@ -45,9 +45,12 @@ def test_the_five_real_failures_keep_the_observation():
         assert start is None and end is None
         assert warning is not None
         # The warning has to carry the numbers, or the next person debugging
-        # this reads "timing dropped" and learns nothing.
+        # this reads "timing dropped" and learns nothing. At full precision:
+        # rounded to 2 decimals the tt7 whole-clip rejection printed
+        # "end_time_sec=6.67 outside segment [0.00, 6.67]", which reads as a
+        # contradiction because the 0.0033s that caused it was rounded away.
         assert "end_time_sec" in warning
-        assert f"{seg_start:.2f}" in warning
+        assert f"{seg_start:.6f}" in warning
 
 
 def test_offsets_inside_the_segment_are_untouched():
@@ -104,6 +107,85 @@ def test_one_missing_bound_still_converts_the_other():
     start, end, warning = _absolute_timing(record, 10.0, 12.0)
     assert (start, end) == (10.5, None)
     assert warning is None
+
+
+# ── The sub-frame overshoot ──────────────────────────────────────────────────
+#
+# tt7's whole-clip segment is [0.0, 6.666666666666667] — 200 frames at 30fps.
+# _render_prompt tells the model the clip is "6.67" seconds long, so the model
+# answered 6.67 and the answer was rejected for being 0.0033s past the end. It
+# was the correct answer, thrown away by the rounding in the question.
+
+_TT7_FPS = 30.0
+_TT7_SEG_END = 200 / _TT7_FPS  # 6.666666666666667, s01's own arithmetic
+
+
+def test_the_real_tt7_whole_clip_answer_is_no_longer_rejected():
+    """The verbatim run-2 case: end_time_sec 6.67 on a 6.666666666666667s clip."""
+    record = {"start_time_sec": 0.0, "end_time_sec": 6.67}
+    start, end, warning = _absolute_timing(record, 0.0, _TT7_SEG_END, _TT7_FPS)
+    assert start == 0.0
+    assert end == _TT7_SEG_END          # snapped to the edge, not to 6.67
+    assert warning is not None          # and the snap is reported
+    assert "within one frame" in warning
+
+
+def test_the_overshoot_is_smaller_than_one_frame():
+    """The premise of the snap, stated as arithmetic rather than asserted."""
+    assert 6.67 - _TT7_SEG_END < 1.0 / _TT7_FPS
+    assert 6.67 - _TT7_SEG_END == pytest.approx(0.00333, abs=1e-5)
+
+
+def test_an_overshoot_of_more_than_one_frame_is_still_dropped():
+    """The snap must not become a clamp. One frame at 30fps is 0.0333s."""
+    record = {"start_time_sec": 0.0, "end_time_sec": _TT7_SEG_END + 0.05}
+    start, end, warning = _absolute_timing(record, 0.0, _TT7_SEG_END, _TT7_FPS)
+    assert start is None and end is None
+    assert "outside segment" in warning
+
+
+def test_the_2_0_offset_on_a_short_clip_is_still_dropped_with_fps():
+    """The five real failures must not be rescued by the snap."""
+    for seg_start, seg_end, rel_end in _REAL_FAILURES:
+        record = {"start_time_sec": 0.0, "end_time_sec": rel_end}
+        start, end, warning = _absolute_timing(record, seg_start, seg_end, 30.0)
+        assert start is None and end is None
+        assert "outside segment" in warning
+
+
+def test_no_fps_means_no_snapping():
+    """Absent video metadata must not produce a guessed frame rate."""
+    record = {"start_time_sec": 0.0, "end_time_sec": 6.67}
+    start, end, warning = _absolute_timing(record, 0.0, _TT7_SEG_END)
+    assert start is None and end is None
+    assert "outside segment" in warning
+
+
+def test_a_bound_inside_the_segment_is_never_moved():
+    """Snapping only ever pulls a value IN; it must not round a real offset."""
+    inside = _TT7_SEG_END - 0.001  # within one frame of the edge, but inside
+    record = {"start_time_sec": 0.001, "end_time_sec": inside}
+    start, end, warning = _absolute_timing(record, 0.0, _TT7_SEG_END, _TT7_FPS)
+    assert start == 0.001
+    assert end == inside
+    assert warning is None
+
+
+def test_a_sub_frame_undershoot_at_the_start_snaps_too():
+    """The rule is about the segment's edges, not about the end bound."""
+    record = {"start_time_sec": -0.01, "end_time_sec": 1.0}
+    start, end, warning = _absolute_timing(record, 0.0, 2.0, _TT7_FPS)
+    assert start == 0.0
+    assert end == 1.0
+    assert "start_time_sec" in warning
+
+
+def test_snapping_cannot_invert_the_interval():
+    """A snap that produced start > end would have to drop both bounds."""
+    record = {"start_time_sec": 1.0, "end_time_sec": -0.01}
+    start, end, warning = _absolute_timing(record, 0.0, 2.0, _TT7_FPS)
+    assert start is None and end is None
+    assert ">" in warning
 
 
 # ── The same failure through the whole stage ─────────────────────────────────
