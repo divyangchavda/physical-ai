@@ -272,6 +272,12 @@ def caption_corpus(run_dir: Path) -> list[dict]:
             "raw_action": record.get("raw_action"),
             "objects": record.get("objects"),
             "status": record.get("status"),
+            # Kept because a call that returned nothing is not one kind of event.
+            # Five clips of the 60-clip run failed on "503 UNAVAILABLE", which is
+            # the API being busy and says nothing about the pipeline; a parse
+            # failure or a safety block would say a great deal. Without the
+            # reason, results.json cannot tell those apart afterwards.
+            "error_reason": record.get("error_reason"),
             "segment_start_sec": record.get("segment_start_sec"),
             "segment_end_sec": record.get("segment_end_sec"),
         })

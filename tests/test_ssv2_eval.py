@@ -276,6 +276,20 @@ def test_a_missing_observations_file_is_empty_not_fatal(tmp_path):
     assert caption_corpus(tmp_path) == []
 
 
+def test_why_a_call_returned_nothing_is_recorded_beside_the_fact_that_it_did(tmp_path):
+    """Five clips of the 60-clip run failed on a Gemini 503, which is the API
+    being busy. A parse failure or a safety block would mean something entirely
+    different about our prompt, and the two are indistinguishable afterwards
+    unless the reason is kept."""
+    (tmp_path / "vlm_observations.json").write_text(json.dumps([{
+        "raw_action": None, "status": "FAILED",
+        "error_reason": "Gemini inference failed: 503 UNAVAILABLE.",
+    }]), encoding="utf-8")
+    entry = caption_corpus(tmp_path)[0]
+    assert entry["raw_action"] is None
+    assert "503" in entry["error_reason"]
+
+
 def test_an_unreadable_observations_file_is_empty_not_fatal(tmp_path):
     (tmp_path / "vlm_observations.json").write_text("{ truncated", encoding="utf-8")
     assert caption_corpus(tmp_path) == []
