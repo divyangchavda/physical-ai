@@ -10,6 +10,7 @@ makes on its own, each of which could silently distort a reported accuracy:
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -21,6 +22,8 @@ sys.path.insert(0, str(REPO / "tools"))
 from ssv2_eval import (  # noqa: E402
     BASE_CLASSES,
     build_prompt,
+    caption_corpus,
+    event_summary,
     interleave_by_verb,
     merge_results,
     primary_event,
@@ -244,3 +247,55 @@ def test_a_crossed_axis_is_other_not_reversed():
     """ONTO and INTO are different axes; calling that REVERSED would overstate
     how close the answer was."""
     assert score_direction("PLACE", "Putting [something] into [something]") == "OTHER"
+
+
+# ───────────────────────── the replay corpus, so a lost run dir costs nothing
+def test_every_caption_is_recorded_not_only_the_winning_one(tmp_path):
+    """The 113-minute run whose run dirs a kernel restart destroyed left only the
+    winning event's caption. A clip describing two actions was then unscoreable."""
+    (tmp_path / "vlm_observations.json").write_text(json.dumps([
+        {"raw_action": "opening the box", "objects": ["box"], "status": "SUCCESS",
+         "segment_start_sec": 0.0, "segment_end_sec": 2.0},
+        {"raw_action": "closing the lid", "objects": ["lid"], "status": "SUCCESS",
+         "segment_start_sec": 2.0, "segment_end_sec": 4.0},
+    ]), encoding="utf-8")
+    corpus = caption_corpus(tmp_path)
+    assert [c["raw_action"] for c in corpus] == ["opening the box", "closing the lid"]
+
+
+def test_the_objects_are_recorded_so_object_blanking_can_be_replayed(tmp_path):
+    """Without them "red folder" reads as a fold and outranks the real verb."""
+    (tmp_path / "vlm_observations.json").write_text(json.dumps(
+        [{"raw_action": "placing it on a red folder", "objects": ["red folder"]}]
+    ), encoding="utf-8")
+    assert caption_corpus(tmp_path)[0]["objects"] == ["red folder"]
+
+
+def test_a_missing_observations_file_is_empty_not_fatal(tmp_path):
+    """The corpus helps the next run; losing it must not kill the one in progress."""
+    assert caption_corpus(tmp_path) == []
+
+
+def test_an_unreadable_observations_file_is_empty_not_fatal(tmp_path):
+    (tmp_path / "vlm_observations.json").write_text("{ truncated", encoding="utf-8")
+    assert caption_corpus(tmp_path) == []
+
+
+def test_an_observations_file_wrapped_in_a_dict_is_read_too(tmp_path):
+    """s06 writes a bare list, but the replay path accepts either shape."""
+    (tmp_path / "vlm_observations.json").write_text(
+        json.dumps({"observations": [{"raw_action": "opening the box"}]}),
+        encoding="utf-8",
+    )
+    assert caption_corpus(tmp_path)[0]["raw_action"] == "opening the box"
+
+
+def test_the_confidence_that_decides_top1_is_recorded(tmp_path):
+    """primary_event ranks on confidence, so a two-event clip cannot be scored
+    offline without it."""
+    summary = event_summary([_ev("TOUCH", 0.4, 0.0), _ev("PICK", 0.9, 1.0)])
+    assert summary == [
+        {"action": "TOUCH", "confidence": 0.4, "start_sec": 0.0},
+        {"action": "PICK", "confidence": 0.9, "start_sec": 1.0},
+    ]
+    assert primary_event(summary)["action"] == "PICK"

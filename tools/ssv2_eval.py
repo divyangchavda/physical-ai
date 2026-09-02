@@ -189,7 +189,8 @@ def run_one(clip: dict, bundle: Path, config: Path, out: Path,
 
     events_path = run_dir / "events.json"
     if not events_path.exists():
-        record.update(verdict="NO_OUTPUT", got=None, n_events=0, direction="N/A")
+        record.update(verdict="NO_OUTPUT", got=None, n_events=0, direction="N/A",
+                      captions=caption_corpus(run_dir), events=[])
         return record
 
     events = json.loads(events_path.read_text(encoding="utf-8"))
@@ -222,8 +223,75 @@ def run_one(clip: dict, bundle: Path, config: Path, out: Path,
         direction=score_direction(got, clip["template"]) if got else "N/A",
         raw_action=(chosen.get("attributes") or {}).get("raw_action") if chosen else None,
         verb_source=(chosen.get("attributes") or {}).get("verb_source") if chosen else None,
+        # The offline replay corpus. Recorded for every clip, including the ones
+        # that emitted nothing, so a later verb change can be scored without the
+        # run directories these were read from.
+        captions=caption_corpus(run_dir),
+        events=event_summary(events),
     )
     return record
+
+
+def caption_corpus(run_dir: Path) -> list[dict]:
+    """Every caption this clip's VLM returned, with the objects it named.
+
+    Written into results.json so that results.json alone is enough to re-score a
+    change to s07's verb mapping. The 200-clip run this was added for cost 113
+    minutes of GPU and its per-clip run directories were then lost to a Kaggle
+    kernel restart, which left only the winning event's caption to work from.
+    That was enough to measure a stem change, but not enough to:
+
+      * replay ``_strip_object_phrases``, which needs the VLM's own object list
+        and is the reason an object called "red folder" does not read as a fold;
+      * see a clip that emitted no event at all, whose caption is otherwise
+        recorded nowhere;
+      * decide top-1 on a caption describing two actions, where the answer
+        depends on which event scored higher.
+
+    Kept to the fields the mapping actually consumes, so 200 clips stay a small
+    file. A missing or unreadable file yields ``[]`` rather than raising: the
+    corpus is a convenience for the next run, and losing it must not cost the
+    measurement in progress.
+    """
+    path = run_dir / "vlm_observations.json"
+    if not path.is_file():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if isinstance(raw, dict):
+        raw = raw.get("observations", [])
+    if not isinstance(raw, list):
+        return []
+    corpus: list[dict] = []
+    for record in raw:
+        if not isinstance(record, dict):
+            continue
+        corpus.append({
+            "raw_action": record.get("raw_action"),
+            "objects": record.get("objects"),
+            "status": record.get("status"),
+            "segment_start_sec": record.get("segment_start_sec"),
+            "segment_end_sec": record.get("segment_end_sec"),
+        })
+    return corpus
+
+
+def event_summary(events: list[dict]) -> list[dict]:
+    """Each event's verb and the confidence that decides which one is top-1.
+
+    Recorded because ``primary_event`` ranks on confidence, so without it a
+    caption describing two actions cannot be scored offline at all.
+    """
+    return [
+        {
+            "action": str(e.get("action")),
+            "confidence": e.get("confidence"),
+            "start_sec": e.get("start_sec"),
+        }
+        for e in events
+    ]
 
 
 def merge_results(path: Path, records: list[dict]) -> list[dict]:

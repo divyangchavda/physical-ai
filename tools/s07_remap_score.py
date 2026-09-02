@@ -47,12 +47,28 @@ sys.path.insert(0, str(REPO))
 from src.stages.s07_events import _action_clauses, _map_raw_action_to_type  # noqa: E402
 
 
+def record_objects(record: dict) -> list[str] | None:
+    """The object names the VLM listed alongside this clip's winning caption.
+
+    Runs before the ``captions`` field existed do not have this, and for those
+    the mapping runs with ``objects=None`` — strictly harsher than the live
+    pipeline, since ``_strip_object_phrases`` then blanks nothing and an object
+    whose name contains a verb ("red folder", "push chopper") can outrank the
+    real verb. Newer runs record it, so those replay exactly.
+    """
+    for entry in record.get("captions") or []:
+        if entry.get("raw_action") == record.get("raw_action"):
+            objects = entry.get("objects")
+            return objects if objects else None
+    return None
+
+
 def remap(record: dict) -> str | None:
     """The verb the current code assigns to this clip's recorded caption."""
     raw = record.get("raw_action")
     if not raw:
         return None
-    return _map_raw_action_to_type(raw, None).value
+    return _map_raw_action_to_type(raw, record_objects(record)).value
 
 
 def remap_all(record: dict) -> list[str]:
@@ -66,7 +82,7 @@ def remap_all(record: dict) -> list[str]:
     raw = record.get("raw_action")
     if not raw:
         return []
-    return [a.value for a, _ in _action_clauses(raw.lower(), None)]
+    return [a.value for a, _ in _action_clauses(raw.lower(), record_objects(record))]
 
 
 def is_multi_verb(record: dict) -> bool:
